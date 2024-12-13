@@ -23,26 +23,19 @@ var client = new CallAutomationClient(connectionString: acsConnectionString);
 var cognitiveServicesEndpoint = builder.Configuration.GetValue<string>("CognitiveServiceEndpoint");
 ArgumentNullException.ThrowIfNullOrEmpty(cognitiveServicesEndpoint);
 
-string answerPromptSystemTemplate = """ 
-    You are an assisant designed to answer the customer query and analyze the sentiment score from the customer tone. 
-    You also need to determine the intent of the customer query and classify it into categories such as sales, marketing, shopping, etc.
-    Use a scale of 1-10 (10 being highest) to rate the sentiment score. 
-    Use the below format, replacing the text in brackets with the result. Do not include the brackets in the output: 
-    Content:[Answer the customer query briefly and clearly in two lines and ask if there is anything else you can help with] 
-    Score:[Sentiment score of the customer tone] 
-    Intent:[Determine the intent of the customer query] 
-    Category:[Classify the intent into one of the categories]
-    """;
-
-string helloPrompt = "Welcome to Bronx Defenders";
-string firstPrompt = "In order to proceed, Press 1 for English, Press 2 for Spanish";
-string callerIssuePrompt = "Press 1 - Are the police looking for you?, Press 2 - ACS / Family, Press 3 - Other";
-string callerIssuePromptSpanish = "Presione 1 - ¿La policía te está buscando?, Presione 2 - ACS / Familia, Presione 3 - Otro";
+string helloPrompt = "Thank you for calling the Bronx Defenders Early Defense Hotline.";
+string firstPrompt = "For English, press 1. Para hablar con alguien en español oprima el dos. If your spoken language was not listed, press 3.";
+string callerIssuePrompt = "If you are calling because the police have arrested or are looking to arrest or speak to you or a family member, press 1. If you are calling about an ACS/Family Court related issue, press 2. If you are calling about another issue press 3";
+string callerIssuePromptSpanish = "Si llama porque la policía lo han arrestado o buscan arrestar o hablar con usted o un miembro de su familia, presione 1. Si llama por un problema relacionado con ACS (Administración de Servicios Infantiles) o corte de familia presione 2. Si llama por otro problema, presione 3";
 string goodbyePrompt = "Thank you for calling! I hope I was able to assist you. Have a great day!";
 string goodbyePromptSpanish = "¡Gracias por llamar! Espero haber podido ayudarte. ¡Que tengas un gran día!";
 string agentPhoneNumberEmptyPrompt = "I'm sorry, we're currently experiencing high call volumes and all of our agents are currently busy. Our next available agent will call you back as soon as possible.";
 string agentPhoneNumberPrompt = "You will be connected to an agent shortly";
 string agentPhoneNumberPromptSpanish = "Serás conectado con un agente en breve";
+string criminalVoicemail = " Hello, you have reached the Bronx Defenders Early Defense Team Hotline. If you have a question or you seek representation for a matter where you are not represented, please leave your name, number and a brief explanation of the issue. Most importantly, please do not speak to the police or other government officials until you have spoken to an attorney.";
+string criminalVoicemailSpanish = "Hola, usted se ha comunicado con la línea directa del equipo de primera defensa de Los Bronx Defenders. Si tiene alguna pregunta o busca representación para un asunto en la cual no tiene representación, deje su nombre, número de teléfono y una breve explicación del problema. Lo más importante es que no hable con la policía o otros oficiales hasta haber hablado con un abogado.";
+string familyVoicemail = "You've reached the Bronx Defenders Family Defense hotline. Please leave your name and phone number so someone can get back to you.";
+string familyVoicemailSpanish = "Hola, Usted ha contactado a Bronx Defenders, la linea directa de la practica familiar. Por favor deje su nombre y su numero de telefono y alguien le devolvera la llamada. Gracias.";
 string recordingPrompt = "You will be redirected to voicemail, start recording your message";
 string recordingPromptSpanish = "Se le redirigirá al correo de voz, comience a grabar su mensaje";
 string recordingStatusPrompt = "Recording Download Location : {_contentLocation}, Recording Delete Location: {_deleteLocation}";
@@ -59,13 +52,17 @@ string goodbyeContext = "Goodbye";
   
 string agentPhonenumber = builder.Configuration.GetValue<string>("AgentPhoneNumber");
 
+string voiceMailRecordingContentLocation = "";
+string voiceMailRecordingMetadataLocation = "";
+string voiceMailRecordingDeleteLocation = "";
+
 var key = builder.Configuration.GetValue<string>("AzureOpenAIServiceKey");
 ArgumentNullException.ThrowIfNullOrEmpty(key);
 
 var endpoint = builder.Configuration.GetValue<string>("AzureOpenAIServiceEndpoint");
 ArgumentNullException.ThrowIfNullOrEmpty(endpoint);
 
-var ai_client = new OpenAIClient(new Uri(endpoint), new AzureKeyCredential(key));
+var ai_client = new OpenAI.OpenAIClient(new AzureKeyCredential(key));
 
 //Register and make CallAutomationClient accessible via dependency injection
 builder.Services.AddSingleton(client);
@@ -122,8 +119,8 @@ foreach (var eventGridEvent in eventGridEvents)
         await HandlePlayAsync(helloPrompt, "Hello Prompt", callConnectionMedia);
         await HandlePlayAsync(firstPrompt, "FirstPrompt", callConnectionMedia);
 
-            // Start continuous DTMF recognition
-            await StartContinousDTMFRecognition(client, answerCallResult.CallConnection.CallConnectionId, callerId);
+        // Start continuous DTMF recognition
+        await StartContinousDTMFRecognition(client, answerCallResult.CallConnection.CallConnectionId, callerId);
     }
            
         client.GetEventProcessor().AttachOngoingEventProcessor<PlayCompleted>(answerCallResult.CallConnection.CallConnectionId, async (playCompletedEvent) =>
@@ -199,9 +196,9 @@ foreach (var eventGridEvent in eventGridEvents)
                     logger.LogInformation($"Transfer call initiated: {result.OperationContext}");
                 }
             }
-            else if (dtmfEvent.Tone.Equals(DtmfTone.Pound) && dtmfEvent.SequenceId == 2)
+            else if (dtmfEvent.Tone.Equals(DtmfTone.Three) && dtmfEvent.SequenceId == 2)
             {
-                await HandlePlayAsync("Please hold the line and I'll transfer you shortly.", voiceMailContext, callConnectionMedia);
+                await HandlePlayAsync(familyVoicemail, voiceMailContext, callConnectionMedia);
                 // Transfer to voicemail
                 var serverCallId = client.GetCallConnection(answerCallResult.CallConnection.CallConnectionId).GetCallConnectionProperties().Value.ServerCallId;
                 var callLocator = new ServerCallLocator(serverCallId);
@@ -210,8 +207,8 @@ foreach (var eventGridEvent in eventGridEvents)
                 {
                     RecordingContent = RecordingContent.Audio,
                     RecordingChannel = RecordingChannel.Unmixed,
-                    RecordingFormat = RecordingFormat.Wav
-                    //RecordingStorage = RecordingStorage.CreateAzureBlobContainerRecordingStorage(new Uri("https://voicemailrecordingstgacc.blob.core.windows.net/voicemails"))
+                    RecordingFormat = RecordingFormat.Wav,
+                    RecordingStorage = RecordingStorage.CreateAzureBlobContainerRecordingStorage(new Uri("https://voicemailrecordingstgacc.blob.core.windows.net/bronxdefendersvoicemails"))
                 };
 
                 Response<RecordingStateResult> recordingResponse = await client.GetCallRecording()
@@ -221,7 +218,6 @@ foreach (var eventGridEvent in eventGridEvents)
                 logger.LogInformation($"Recording started. RecordingId: {recordingId}");
             }
         });
-
         client.GetEventProcessor().AttachOngoingEventProcessor<PlayFailed>(answerCallResult.CallConnection.CallConnectionId, async (playFailedEvent) =>
         {
             logger.LogInformation($"Play failed event received for connection id: {playFailedEvent.CallConnectionId}. Hanging up call...");
@@ -235,6 +231,7 @@ foreach (var eventGridEvent in eventGridEvents)
         client.GetEventProcessor().AttachOngoingEventProcessor<CallTransferFailed>(answerCallResult.CallConnection.CallConnectionId, async (callTransferFailedEvent) =>
         {
             logger.LogInformation($"Call transfer failed event received for connection id: {callTransferFailedEvent.CallConnectionId}.");
+
             var resultInformation = callTransferFailedEvent.ResultInformation;
             logger.LogError("Encountered error during call transfer, message={msg}, code={code}, subCode={subCode}", resultInformation?.Message, resultInformation?.Code, resultInformation?.SubCode);
 
@@ -295,15 +292,45 @@ app.MapPost("/api/callbacks/{contextId}", async (
 });
 
 // api to handle call back events
-app.MapPost("/api/voicemailStatus/{contextId}", async (
-    [FromBody] CloudEvent[] cloudEvents,
-    [FromRoute] string contextId,
-    [Required] string callerId,
-    CallAutomationClient callAutomationClient,
+app.MapPost("/api/recordingFileStatus", async (
+    [FromBody] EventGridEvent[] eventGridEvents,
     ILogger<Program> logger) =>
 {
-    var eventProcessor = client.GetEventProcessor();
-    eventProcessor.ProcessEvents(cloudEvents);
+    foreach (var eventGridEvent in eventGridEvents)
+    {
+        logger.LogInformation($"Incoming Call event received.");
+
+        // Handle system events
+        if (eventGridEvent.TryGetSystemEventData(out object eventData))
+        {
+            // Handle the subscription validation event.
+            if (eventData is SubscriptionValidationEventData subscriptionValidationEventData)
+            {
+                var responseData = new SubscriptionValidationResponse
+                {
+                    ValidationResponse = subscriptionValidationEventData.ValidationCode
+                };
+                return Results.Ok(responseData);
+            }
+        }
+
+        if (eventData is Azure.Messaging.EventGrid.SystemEvents.AcsRecordingFileStatusUpdatedEventData statusUpdated)
+        {
+            voiceMailRecordingContentLocation = statusUpdated.RecordingStorageInfo.RecordingChunks[0].ContentLocation;
+            voiceMailRecordingMetadataLocation = statusUpdated.RecordingStorageInfo.RecordingChunks[0].MetadataLocation;
+            voiceMailRecordingDeleteLocation = statusUpdated.RecordingStorageInfo.RecordingChunks[0].DeleteLocation;
+
+            logger.LogInformation($"Recording Location: {voiceMailRecordingContentLocation}\n Recording Metadata: {voiceMailRecordingMetadataLocation}");
+        }
+    }
+    return Results.Ok($"Recording Download Location : {voiceMailRecordingContentLocation}, Recording Delete Location: {voiceMailRecordingDeleteLocation}");
+});
+
+app.MapGet("/api/downloadVoicemail", async (
+    ILogger<Program> logger) =>
+{
+    var callRecording = client.GetCallRecording();
+    callRecording.DownloadTo(new Uri(voiceMailRecordingContentLocation), "Recording_File.wav");
     return Results.Ok();
 });
 
