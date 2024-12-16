@@ -47,7 +47,7 @@ string EndCallPhraseToConnectAgent = "Sure, please stay on the line. I'm going t
 
 string transferFailedContext = "TransferFailed";
 string connectAgentContext = "ConnectAgent";
-string voiceMailContext = "Voicemail";
+string criminalVoiceMailContext = "CriminalVoicemail";
 string goodbyeContext = "Goodbye";
   
 string agentPhonenumber = builder.Configuration.GetValue<string>("AgentPhoneNumber");
@@ -79,55 +79,54 @@ app.MapPost("/api/incomingCall", async (
     [FromBody] EventGridEvent[] eventGridEvents,
     ILogger<Program> logger) =>
 {
-foreach (var eventGridEvent in eventGridEvents)
-{
-    logger.LogInformation($"Incoming Call event received.");
-
-    // Handle system events
-    if (eventGridEvent.TryGetSystemEventData(out object eventData))
+    foreach (var eventGridEvent in eventGridEvents)
     {
-        // Handle the subscription validation event.
-        if (eventData is SubscriptionValidationEventData subscriptionValidationEventData)
+        logger.LogInformation($"Incoming Call event received.");
+
+        // Handle system events
+        if (eventGridEvent.TryGetSystemEventData(out object eventData))
         {
-            var responseData = new SubscriptionValidationResponse
+            // Handle the subscription validation event.
+            if (eventData is SubscriptionValidationEventData subscriptionValidationEventData)
             {
-                ValidationResponse = subscriptionValidationEventData.ValidationCode
-            };
-            return Results.Ok(responseData);
+                var responseData = new SubscriptionValidationResponse
+                {
+                    ValidationResponse = subscriptionValidationEventData.ValidationCode
+                };
+                return Results.Ok(responseData);
+            }
         }
-    }
 
-    var jsonObject = Helper.GetJsonObject(eventGridEvent.Data);
-    var callerId = Helper.GetCallerId(jsonObject);
-    var incomingCallContext = Helper.GetIncomingCallContext(jsonObject);
-    var callbackUri = new Uri(new Uri(devTunnelUri), $"/api/callbacks/{Guid.NewGuid()}?callerId={callerId}");
-    logger.LogInformation($"Callback Url: {callbackUri}");
-    var options = new AnswerCallOptions(incomingCallContext, callbackUri)
-    {
-        CallIntelligenceOptions = new CallIntelligenceOptions() { CognitiveServicesEndpoint = new Uri(cognitiveServicesEndpoint) }
-    };
+        var jsonObject = Helper.GetJsonObject(eventGridEvent.Data);
+        var callerId = Helper.GetCallerId(jsonObject);
+        var incomingCallContext = Helper.GetIncomingCallContext(jsonObject);
+        var callbackUri = new Uri(new Uri(devTunnelUri), $"/api/callbacks/{Guid.NewGuid()}?callerId={callerId}");
+        logger.LogInformation($"Callback Url: {callbackUri}");
+        var options = new AnswerCallOptions(incomingCallContext, callbackUri)
+        {
+            CallIntelligenceOptions = new CallIntelligenceOptions() { CognitiveServicesEndpoint = new Uri(cognitiveServicesEndpoint) }
+        };
 
-    AnswerCallResult answerCallResult = await client.AnswerCallAsync(options);
-    logger.LogInformation($"Answered call for connection id: {answerCallResult.CallConnection.CallConnectionId}");
+        AnswerCallResult answerCallResult = await client.AnswerCallAsync(options);
+        logger.LogInformation($"Answered call for connection id: {answerCallResult.CallConnection.CallConnectionId}");
 
-    //Use EventProcessor to process CallConnected event
-    var answer_result = await answerCallResult.WaitForEventProcessorAsync();
-    if (answer_result.IsSuccess)
-    {
-        logger.LogInformation($"Call connected event received for connection id: {answer_result.SuccessResult.CallConnectionId}");
-        var callConnectionMedia = answerCallResult.CallConnection.GetCallMedia();
-        await HandlePlayAsync(helloPrompt, "Hello Prompt", callConnectionMedia);
-        await HandlePlayAsync(firstPrompt, "FirstPrompt", callConnectionMedia);
+        //Use EventProcessor to process CallConnected event
+        var answer_result = await answerCallResult.WaitForEventProcessorAsync();
+        if (answer_result.IsSuccess)
+        {
+            logger.LogInformation($"Call connected event received for connection id: {answer_result.SuccessResult.CallConnectionId}");
+            var callConnectionMedia = answerCallResult.CallConnection.GetCallMedia();
+            await HandlePlayAsync(helloPrompt, "Hello Prompt", callConnectionMedia);
+            await HandleRecognizeAsync(callConnectionMedia, callerId, firstPrompt);
 
-        // Start continuous DTMF recognition
-        await StartContinousDTMFRecognition(client, answerCallResult.CallConnection.CallConnectionId, callerId);
-    }
-           
+            // Start continuous DTMF recognition
+            await StartContinousDTMFRecognition(client, answerCallResult.CallConnection.CallConnectionId, callerId);
+        }
         client.GetEventProcessor().AttachOngoingEventProcessor<PlayCompleted>(answerCallResult.CallConnection.CallConnectionId, async (playCompletedEvent) =>
         {
             logger.LogInformation($"Play completed event received for connection id: {playCompletedEvent.CallConnectionId}.");
             if (!string.IsNullOrWhiteSpace(playCompletedEvent.OperationContext) && (playCompletedEvent.OperationContext.Equals(transferFailedContext, StringComparison.OrdinalIgnoreCase) 
-            || playCompletedEvent.OperationContext.Equals(goodbyeContext, StringComparison.OrdinalIgnoreCase)))
+                || playCompletedEvent.OperationContext.Equals(goodbyeContext, StringComparison.OrdinalIgnoreCase)))
             {
                 logger.LogInformation($"Disconnecting the call...");
                 await answerCallResult.CallConnection.HangUpAsync(true);
@@ -149,18 +148,17 @@ foreach (var eventGridEvent in eventGridEvents)
                 }
             }
         });
-
         client.GetEventProcessor().AttachOngoingEventProcessor<ContinuousDtmfRecognitionToneReceived>(answerCallResult.CallConnection.CallConnectionId, async (dtmfEvent) =>
         {
             logger.LogInformation($"DTMF tone received: {dtmfEvent.Tone}");
             var callConnectionMedia = answerCallResult.CallConnection.GetCallMedia();
             if (dtmfEvent.Tone.Equals(DtmfTone.One) && dtmfEvent.SequenceId == 1)
             {
-                await HandlePlayAsync(callerIssuePrompt, "CallerIssue", callConnectionMedia);
+                await HandleRecognizeAsync(callConnectionMedia, callerId, callerIssuePrompt);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Two) && dtmfEvent.SequenceId == 1)
             {
-                await HandlePlayAsync(callerIssuePromptSpanish, "CallerIssue", callConnectionMedia);
+                await HandleRecognizeAsync(callConnectionMedia, callerId, callerIssuePromptSpanish);
             }
             if (dtmfEvent.Tone.Equals(DtmfTone.One) && dtmfEvent.SequenceId == 2)
             {
@@ -173,8 +171,6 @@ foreach (var eventGridEvent in eventGridEvents)
                 else
                 {
                     logger.LogInformation($"Initializing the Call transfer...");
-                    await HandlePlayAsync(agentPhoneNumberPrompt,
-                      transferFailedContext, answerCallResult.CallConnection.GetCallMedia());
                     CommunicationIdentifier transferDestination = new PhoneNumberIdentifier(agentPhonenumber);
                     TransferCallToParticipantResult result = await answerCallResult.CallConnection.TransferCallToParticipantAsync(transferDestination);
                     logger.LogInformation($"Transfer call initiated: {result.OperationContext}");
@@ -198,11 +194,13 @@ foreach (var eventGridEvent in eventGridEvents)
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Three) && dtmfEvent.SequenceId == 2)
             {
-                await HandlePlayAsync(familyVoicemail, voiceMailContext, callConnectionMedia);
-                // Transfer to voicemail
+                await HandlePlayAsync(criminalVoicemail, criminalVoiceMailContext, callConnectionMedia);
+                Thread.Sleep(5000);
+
+                //Transfer to voicemail
                 var serverCallId = client.GetCallConnection(answerCallResult.CallConnection.CallConnectionId).GetCallConnectionProperties().Value.ServerCallId;
                 var callLocator = new ServerCallLocator(serverCallId);
-                //await HandlePlayAsync("You will be redirected to voicemail, start recording your message.", transferFailedContext, answerCallResult.CallConnection.GetCallMedia());
+
                 StartRecordingOptions recordingOptions = new StartRecordingOptions(callLocator)
                 {
                     RecordingContent = RecordingContent.Audio,
@@ -212,7 +210,7 @@ foreach (var eventGridEvent in eventGridEvents)
                 };
 
                 Response<RecordingStateResult> recordingResponse = await client.GetCallRecording()
-                .StartAsync(recordingOptions);
+                    .StartAsync(recordingOptions);
 
                 var recordingId = recordingResponse.Value.RecordingId;
                 logger.LogInformation($"Recording started. RecordingId: {recordingId}");
@@ -235,19 +233,15 @@ foreach (var eventGridEvent in eventGridEvents)
             var resultInformation = callTransferFailedEvent.ResultInformation;
             logger.LogError("Encountered error during call transfer, message={msg}, code={code}, subCode={subCode}", resultInformation?.Message, resultInformation?.Code, resultInformation?.SubCode);
 
-            /*await HandlePlayAsync(callTransferFailurePrompt,
-                       transferFailedContext, answerCallResult.CallConnection.GetCallMedia());*/
-
             // Transfer to voicemail
             var serverCallId = client.GetCallConnection(answerCallResult.CallConnection.CallConnectionId).GetCallConnectionProperties().Value.ServerCallId;
             var callLocator = new ServerCallLocator(serverCallId);
-            //await HandlePlayAsync("You will be redirected to voicemail, start recording your message.", transferFailedContext, answerCallResult.CallConnection.GetCallMedia());
             StartRecordingOptions recordingOptions = new StartRecordingOptions(callLocator)
             {
                 RecordingContent = RecordingContent.Audio,
                 RecordingChannel = RecordingChannel.Unmixed,
-                RecordingFormat = RecordingFormat.Wav
-                //RecordingStorage = RecordingStorage.CreateAzureBlobContainerRecordingStorage(new Uri("https://voicemailrecordingstgacc.blob.core.windows.net/voicemails"))
+                RecordingFormat = RecordingFormat.Wav,
+                RecordingStorage = RecordingStorage.CreateAzureBlobContainerRecordingStorage(new Uri("https://voicemailrecordingstgacc.blob.core.windows.net/bronxdefendersvoicemails"))
             };
 
             Response<RecordingStateResult> recordingResponse = await client.GetCallRecording()
@@ -257,6 +251,11 @@ foreach (var eventGridEvent in eventGridEvents)
             logger.LogInformation($"Recording started. RecordingId: {recordingId}");
 
         });
+        client.GetEventProcessor().AttachOngoingEventProcessor<AnswerFailed>(answerCallResult.CallConnection.CallConnectionId, async (answerFailedEvent) =>
+        {
+            logger.LogInformation($"Answer Failed reason event received for connection id: {answerFailedEvent.ResultInformation.Message}.");
+        });
+
         client.GetEventProcessor().AttachOngoingEventProcessor<RecognizeFailed>(answerCallResult.CallConnection.CallConnectionId, async (recognizeFailedEvent) =>
         {
             var callConnectionMedia = answerCallResult.CallConnection.GetCallMedia();
@@ -346,7 +345,7 @@ async Task HandleRecognizeAsync(CallMedia callConnectionMedia, string callerId, 
         new CallMediaRecognizeDtmfOptions(
             targetParticipant: CommunicationIdentifier.FromRawId(callerId), maxTonesToCollect: 3)
         {
-            InterruptPrompt = false,
+            InterruptPrompt = true,
             InitialSilenceTimeout = TimeSpan.FromSeconds(15),
             Prompt = greetingPlaySource,
             OperationContext = "GetFreeFormText"
