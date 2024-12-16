@@ -195,7 +195,10 @@ app.MapPost("/api/incomingCall", async (
             else if (dtmfEvent.Tone.Equals(DtmfTone.Three) && dtmfEvent.SequenceId == 2)
             {
                 await HandlePlayAsync(criminalVoicemail, criminalVoiceMailContext, callConnectionMedia);
-                Thread.Sleep(5000);
+                Thread.Sleep(3000);
+                // Beep sound
+                var beepAudioFile = "https://voicemailrecordingstgacc.blob.core.windows.net/bronxdefendersvoicemails/audiofiles/beep.wav";
+                await HandlePlayAudioAsync(beepAudioFile, criminalVoiceMailContext, callConnectionMedia);
 
                 //Transfer to voicemail
                 var serverCallId = client.GetCallConnection(answerCallResult.CallConnection.CallConnectionId).GetCallConnectionProperties().Value.ServerCallId;
@@ -251,11 +254,6 @@ app.MapPost("/api/incomingCall", async (
             logger.LogInformation($"Recording started. RecordingId: {recordingId}");
 
         });
-        client.GetEventProcessor().AttachOngoingEventProcessor<AnswerFailed>(answerCallResult.CallConnection.CallConnectionId, async (answerFailedEvent) =>
-        {
-            logger.LogInformation($"Answer Failed reason event received for connection id: {answerFailedEvent.ResultInformation.Message}.");
-        });
-
         client.GetEventProcessor().AttachOngoingEventProcessor<RecognizeFailed>(answerCallResult.CallConnection.CallConnectionId, async (recognizeFailedEvent) =>
         {
             var callConnectionMedia = answerCallResult.CallConnection.GetCallMedia();
@@ -361,6 +359,15 @@ async Task HandlePlayAsync(string textToPlay, string context, CallMedia callConn
     {
         VoiceName = "en-US-NancyNeural"
     };
+
+    var playOptions = new PlayToAllOptions(playSource) { OperationContext = context };
+    await callConnectionMedia.PlayToAllAsync(playOptions);
+}
+
+async Task HandlePlayAudioAsync(string audioFile, string context, CallMedia callConnectionMedia)
+{
+    // Play message
+    var playSource = new FileSource(new Uri(audioFile));
 
     var playOptions = new PlayToAllOptions(playSource) { OperationContext = context };
     await callConnectionMedia.PlayToAllAsync(playOptions);
