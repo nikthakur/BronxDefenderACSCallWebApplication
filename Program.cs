@@ -9,6 +9,11 @@ using Azure.Messaging.EventGrid.SystemEvents;
 using Microsoft.AspNetCore.Mvc;
 using System.ComponentModel.DataAnnotations;
 using System.Text.RegularExpressions;
+using Microsoft.PowerPlatform.Dataverse.Client;
+using Microsoft.Identity.Client;
+using System.Net.Http.Headers;
+using Microsoft.Xrm.Sdk.Query;
+using Microsoft.PowerPlatform.Dataverse.Client.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -74,6 +79,40 @@ ArgumentNullException.ThrowIfNullOrEmpty(devTunnelUri);
 var maxTimeout = 2;
 
 app.MapGet("/", () => "Welcome to Bronx Defenders IVR System!");
+
+// Dataverse related variables
+var dataverseUri = builder.Configuration.GetValue<string>("DataverseUri");
+var dataverseClientId = builder.Configuration.GetValue<string>("DataverseClientId");
+var dataverseClientSecret = builder.Configuration.GetValue<string>("DataverseClientSecret");
+var dataverseTenantId = builder.Configuration.GetValue<string>("DataverseTenantId");
+var dataverseConnectionString = builder.Configuration.GetValue<string>("DataverseConnectionString");
+
+ var confidentialClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
+            .WithClientSecret(dataverseClientSecret)
+            .WithAuthority(new Uri($"https://login.microsoftonline.com/{dataverseTenantId}"))
+            .Build();
+
+var authResult = confidentialClient.AcquireTokenForClient(new[] { $"{dataverseUri}/.default" }).ExecuteAsync().Result;
+var accessToken = authResult.AccessToken;
+
+ILogger<ServiceClient> serviceClientLogger = app.Services.GetRequiredService<ILogger<ServiceClient>>();
+ServiceClient _serviceClient = new ServiceClient(dataverseConnectionString);
+
+var columnSet = new ColumnSet(true); // Retrieve all columns
+var scheduleCollection = _serviceClient.RetrieveMultipleAsync(new QueryExpression("bxd_schedule")
+{
+    ColumnSet = columnSet
+}).Result;
+
+var agentCollection = _serviceClient.RetrieveMultipleAsync(new QueryExpression("bxd_agent")
+{
+    ColumnSet = columnSet
+}).Result;
+
+var skillsCollection = _serviceClient.RetrieveMultipleAsync(new QueryExpression("bxd_skills")
+{
+    ColumnSet = columnSet
+}).Result;
 
 app.MapPost("/api/incomingCall", async (
     [FromBody] EventGridEvent[] eventGridEvents,
