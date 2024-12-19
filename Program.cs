@@ -90,109 +90,7 @@ var dataverseClientId = builder.Configuration.GetValue<string>("DataverseClientI
 var dataverseClientSecret = builder.Configuration.GetValue<string>("DataverseClientSecret");
 var dataverseTenantId = builder.Configuration.GetValue<string>("DataverseTenantId");
 var dataverseConnectionString = builder.Configuration.GetValue<string>("DataverseConnectionString");
-
- var confidentialClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
-            .WithClientSecret(dataverseClientSecret)
-            .WithAuthority(new Uri($"https://login.microsoftonline.com/{dataverseTenantId}"))
-            .Build();
-
-// Acquire token for Dataverse
-var authResult = confidentialClient.AcquireTokenForClient(new[] { $"{dataverseUri}/.default" }).ExecuteAsync().Result;
-var accessToken = authResult.AccessToken;
-
-ILogger<ServiceClient> serviceClientLogger = app.Services.GetRequiredService<ILogger<ServiceClient>>();
-ServiceClient _serviceClient = new ServiceClient(dataverseConnectionString);
-
-//create a fetchxml query to retrieve agent schedule
-var scheduleFetchXml = $@"<fetch version='1.0' output-format='xml-platform' mapping='logical' distinct='false'>
-    <entity name='bxd_schedule'>
-        <attribute name='statecode' />
-        <attribute name='bxd_scheduleid' />
-        <attribute name='bxd_name' />
-        <attribute name='bxd_scheduledstart' />
-        <attribute name='bxd_scheduledend' />
-        <attribute name='bxd_availabilitytypecode' />
-        <attribute name='bxd_agentid' />
-        <filter type='and'>
-            <condition attribute='statecode' operator='eq' value='0' />
-            <condition attribute='bxd_scheduledstart' operator='today' />
-        </filter>
-        <link-entity name='bxd_agent' from='bxd_agentid' to='bxd_agentid' alias='agent'>
-            <attribute name='bxd_name' />
-            <attribute name='bxd_primaryphone' />
-        </link-entity>
-    </entity>
-</fetch>";
-
-// Retrieve agents schedule
-EntityCollection responseSchedule = _serviceClient.RetrieveMultipleAsync(new FetchExpression(scheduleFetchXml)).Result;
-List<KeyValuePair<string, string[]>> agentScheduleDict = new List<KeyValuePair<string, string[]>>();
-
-foreach (var schedule in responseSchedule.Entities)
-{
-    var scheduleId = schedule.Attributes["bxd_scheduleid"]?.ToString();
-    var scheduleName = schedule.Attributes["bxd_name"]?.ToString();
-    var scheduleTypeCode = schedule.Attributes["bxd_availabilitytypecode"]?.ToString();
-    var scheduleAgentId = schedule.Attributes["bxd_agentid"]?.ToString();
-    var scheduleStart = schedule.Attributes["bxd_scheduledstart"]?.ToString();
-    var scheduleEnd = schedule.Attributes["bxd_scheduledend"]?.ToString();
-    var agentName = schedule.GetAttributeValue<AliasedValue>("agent.bxd_name").Value.ToString();
-    var agentPrimaryPhone = schedule.GetAttributeValue<AliasedValue>("agent.bxd_primaryphone").Value.ToString();
-
-    if (!string.IsNullOrEmpty(scheduleName) && !string.IsNullOrEmpty(scheduleTypeCode) && !string.IsNullOrEmpty(scheduleAgentId) && !string.IsNullOrEmpty(scheduleStart) && !string.IsNullOrEmpty(scheduleEnd))
-    {
-        // Add agent name as the key and other values as array of values
-        if (agentName != null && agentPrimaryPhone != null)
-        {
-            agentScheduleDict.Add(new KeyValuePair<string, string[]>(scheduleName, new string[] { agentName, agentPrimaryPhone, scheduleTypeCode, scheduleAgentId, scheduleStart, scheduleEnd }));
-        }
-    }
-    else
-    {
-
-    }
-}
-
-//create a fetchxml query to retrieve agent skills
-var fetchXml = $@"<fetch version='1.0' output-format='xml-platform' mapping='logical' distinct='false'>
-    <entity name='bxd_agent'>
-        <attribute name='bxd_name' />
-        <attribute name='bxd_agentid' />
-        <attribute name='bxd_primaryphone' />
-        <attribute name='bxd_iscurrrentlyhandlingcall' />
-        <link-entity name='bxd_agent_bxd_skills' from='bxd_agentid' to='bxd_agentid' intersect='true'>
-            <link-entity name='bxd_skills' from='bxd_skillsid' to='bxd_skillsid' link-type='inner' alias='skills'>
-                <attribute name='bxd_name' />
-                <attribute name='bxd_skillsid' />
-            </link-entity>
-        </link-entity>
-    </entity>
-</fetch>";
-
-// Retrieve agents skills
-EntityCollection responseSkills = _serviceClient.RetrieveMultipleAsync(new FetchExpression(fetchXml)).Result;
-List<KeyValuePair<string, string[]>> agentSkillsDict = new List<KeyValuePair<string, string[]>>();
-
-foreach (var agent in responseSkills.Entities)
-{
-    var agentId = agent.Attributes["bxd_agentid"].ToString();
-    var agentName = agent.Attributes["bxd_name"].ToString();
-    var agentPrimaryPhone = agent.Attributes["bxd_primaryphone"].ToString();
-    var agentIsCurrentlyHandlingCall = (bool)agent.Attributes["bxd_iscurrrentlyhandlingcall"];  
-    var agentSkill = agent.GetAttributeValue<AliasedValue>("skills.bxd_name").Value.ToString();
-    var agentSkillsId = agent.GetAttributeValue<AliasedValue>("skills.bxd_skillsid").Value.ToString();
-
-    if (!string.IsNullOrEmpty(agentName) && !string.IsNullOrEmpty(agentPrimaryPhone) && !string.IsNullOrEmpty(agentSkill))
-    {
-         // Add agent name as the key and other values as array of values
-        agentSkillsDict.Add(new KeyValuePair<string, string[]>(agentName, new string[] { agentName, agentPrimaryPhone, agentSkill, agentIsCurrentlyHandlingCall.ToString() }));
-    }
-    else
-    {
-
-    }
-}
-
+    
 app.MapPost("/api/incomingCall", async (
     [FromBody] EventGridEvent[] eventGridEvents,
     ILogger<Program> logger) =>
@@ -497,12 +395,113 @@ async Task StartContinousDTMFRecognition(CallAutomationClient client, string cal
 
 async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueSkill, AnswerCallResult answerCallResult, ILogger<Program> logger)
 {
+    var dataverseClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
+            .WithClientSecret(dataverseClientSecret)
+            .WithAuthority(new Uri($"https://login.microsoftonline.com/{dataverseTenantId}"))
+            .Build();
+
+    // Acquire token for Dataverse
+    var authResult = dataverseClient.AcquireTokenForClient(new[] { $"{dataverseUri}/.default" }).ExecuteAsync().Result;
+    var accessToken = authResult.AccessToken;
+
+    ILogger<ServiceClient> serviceClientLogger = app.Services.GetRequiredService<ILogger<ServiceClient>>();
+    ServiceClient _serviceClient = new ServiceClient(dataverseConnectionString);
+
+    //create a fetchxml query to retrieve agent schedule
+    var scheduleFetchXml = $@"<fetch version='1.0' output-format='xml-platform' mapping='logical' distinct='false'>
+        <entity name='bxd_schedule'>
+            <attribute name='statecode' />
+            <attribute name='bxd_scheduleid' />
+            <attribute name='bxd_name' />
+            <attribute name='bxd_scheduledstart' />
+            <attribute name='bxd_scheduledend' />
+            <attribute name='bxd_availabilitytypecode' />
+            <attribute name='bxd_agentid' />
+            <filter type='and'>
+                <condition attribute='statecode' operator='eq' value='0' />
+                <condition attribute='bxd_scheduledstart' operator='on' value='12/18/2024' />
+            </filter>
+            <link-entity name='bxd_agent' from='bxd_agentid' to='bxd_agentid' alias='agent'>
+                <attribute name='bxd_name' />
+                <attribute name='bxd_primaryphone' />
+            </link-entity>
+        </entity>
+    </fetch>";
+
+    // Retrieve agents schedule
+    EntityCollection responseSchedule = _serviceClient.RetrieveMultipleAsync(new FetchExpression(scheduleFetchXml)).Result;
+    List<KeyValuePair<string, string[]>> agentScheduleDict = new List<KeyValuePair<string, string[]>>();
+
+    foreach (var schedule in responseSchedule.Entities)
+    {
+        var scheduleId = schedule.Attributes["bxd_scheduleid"]?.ToString();
+        var scheduleName = schedule.Attributes["bxd_name"]?.ToString();
+        var scheduleTypeCode = schedule.Attributes["bxd_availabilitytypecode"]?.ToString();
+        var scheduleAgentId = schedule.Attributes["bxd_agentid"]?.ToString();
+        var scheduleStart = schedule.Attributes["bxd_scheduledstart"]?.ToString();
+        var scheduleEnd = schedule.Attributes["bxd_scheduledend"]?.ToString();
+        var agentName = schedule.GetAttributeValue<AliasedValue>("agent.bxd_name").Value.ToString();
+        var agentPrimaryPhone = schedule.GetAttributeValue<AliasedValue>("agent.bxd_primaryphone").Value.ToString();
+
+        if (!string.IsNullOrEmpty(scheduleName) && !string.IsNullOrEmpty(scheduleTypeCode) && !string.IsNullOrEmpty(scheduleAgentId) && !string.IsNullOrEmpty(scheduleStart) && !string.IsNullOrEmpty(scheduleEnd))
+        {
+            // Add agent name as the key and other values as array of values
+            if (agentName != null && agentPrimaryPhone != null)
+            {
+                agentScheduleDict.Add(new KeyValuePair<string, string[]>(scheduleName, new string[] { agentName, agentPrimaryPhone, scheduleTypeCode, scheduleAgentId, scheduleStart, scheduleEnd }));
+            }
+        }
+        else
+        {
+
+        }
+    }
+
+    //create a fetchxml query to retrieve agent skills
+    var fetchXml = $@"<fetch version='1.0' output-format='xml-platform' mapping='logical' distinct='false'>
+        <entity name='bxd_agent'>
+            <attribute name='bxd_name' />
+            <attribute name='bxd_agentid' />
+            <attribute name='bxd_primaryphone' />
+            <attribute name='bxd_iscurrrentlyhandlingcall' />
+            <link-entity name='bxd_agent_bxd_skills' from='bxd_agentid' to='bxd_agentid' intersect='true'>
+                <link-entity name='bxd_skills' from='bxd_skillsid' to='bxd_skillsid' link-type='inner' alias='skills'>
+                    <attribute name='bxd_name' />
+                    <attribute name='bxd_skillsid' />
+                </link-entity>
+            </link-entity>
+        </entity>
+    </fetch>";
+
+    // Retrieve agents skills
+    EntityCollection responseSkills = _serviceClient.RetrieveMultipleAsync(new FetchExpression(fetchXml)).Result;
+    List<KeyValuePair<string, string[]>> agentSkillsDict = new List<KeyValuePair<string, string[]>>();
+
+    foreach (var agent in responseSkills.Entities)
+    {
+        var agentId = agent.Attributes["bxd_agentid"].ToString();
+        var agentName = agent.Attributes["bxd_name"].ToString();
+        var agentPrimaryPhone = agent.Attributes["bxd_primaryphone"].ToString();
+        var agentIsCurrentlyHandlingCall = (bool)agent.Attributes["bxd_iscurrrentlyhandlingcall"];  
+        var agentSkill = agent.GetAttributeValue<AliasedValue>("skills.bxd_name").Value.ToString();
+        var agentSkillsId = agent.GetAttributeValue<AliasedValue>("skills.bxd_skillsid").Value.ToString();
+
+        if (!string.IsNullOrEmpty(agentName) && !string.IsNullOrEmpty(agentPrimaryPhone) && !string.IsNullOrEmpty(agentSkill))
+        {
+            // Add agent name as the key and other values as array of values
+            agentSkillsDict.Add(new KeyValuePair<string, string[]>(agentName, new string[] { agentName, agentPrimaryPhone, agentSkill, agentIsCurrentlyHandlingCall.ToString() }));
+        }
+        else
+        {
+
+        }
+    }
+
     // Check which agent is available based on schedule
     List<KeyValuePair<string, string>> agentAvailableAgentList = new List<KeyValuePair<string, string>>();
-    
     foreach (var agent in agentScheduleDict)
     {
-        var agentName = agent.Key;
+        var agentName = agent.Value[0];
         var agentPrimaryPhone = agent.Value[1];
         var agentSkill = agent.Value[2];
         var agentId = agent.Value[3];
@@ -520,17 +519,17 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
     // Check if the agent is available from dataverse
     foreach (var agent in agentSkillsDict)
     {
-        var agentName = agent.Key;
-        var agentPrimaryPhone = agent.Value[0];
-        var agentSkill = agent.Value[1];
-        var agentIsCurrentlyHandlingCall = agent.Value[2];
+        var agentName = agent.Value[0];
+        var agentPrimaryPhone = agent.Value[1];
+        var agentSkill = agent.Value[2];
+        var agentIsCurrentlyHandlingCall = agent.Value[3];
 
         if (agentAvailableAgentList.Any(agent => agent.Key == agentName))
         {
-            if (agentSkill == languageSkill && agentSkill == issueSkill)
+            if (agentSkill == languageSkill || agentSkill == issueSkill)
             {
                 // If the agent is available, transfer the call to the agent
-                if (agentIsCurrentlyHandlingCall == "false")
+                if (agentIsCurrentlyHandlingCall == "False")
                 {
                     CommunicationIdentifier transferDestination = new PhoneNumberIdentifier(agentPrimaryPhone);
                     TransferCallToParticipantResult result = await answerCallResult.CallConnection.TransferCallToParticipantAsync(transferDestination);
