@@ -63,7 +63,7 @@ string voiceMailRecordingMetadataLocation = "";
 string voiceMailRecordingDeleteLocation = "";
 
 string languageSelected = String.Empty;
-string ACSorPoliceSelected = String.Empty;
+string issueSelected = String.Empty;
 
 var key = builder.Configuration.GetValue<string>("AzureOpenAIServiceKey");
 ArgumentNullException.ThrowIfNullOrEmpty(key);
@@ -84,7 +84,7 @@ var maxTimeout = 2;
 
 app.MapGet("/", () => "Welcome to Bronx Defenders IVR System!");
 
-// Dataverse related variables
+// Dataverse related config settings
 var dataverseUri = builder.Configuration.GetValue<string>("DataverseUri");
 var dataverseClientId = builder.Configuration.GetValue<string>("DataverseClientId");
 var dataverseClientSecret = builder.Configuration.GetValue<string>("DataverseClientSecret");
@@ -96,12 +96,14 @@ var dataverseConnectionString = builder.Configuration.GetValue<string>("Datavers
             .WithAuthority(new Uri($"https://login.microsoftonline.com/{dataverseTenantId}"))
             .Build();
 
+// Acquire token for Dataverse
 var authResult = confidentialClient.AcquireTokenForClient(new[] { $"{dataverseUri}/.default" }).ExecuteAsync().Result;
 var accessToken = authResult.AccessToken;
 
 ILogger<ServiceClient> serviceClientLogger = app.Services.GetRequiredService<ILogger<ServiceClient>>();
 ServiceClient _serviceClient = new ServiceClient(dataverseConnectionString);
 
+//create a fetchxml query to retrieve agent schedule
 var scheduleFetchXml = $@"<fetch version='1.0' output-format='xml-platform' mapping='logical' distinct='false'>
     <entity name='bxd_schedule'>
         <attribute name='statecode' />
@@ -122,6 +124,7 @@ var scheduleFetchXml = $@"<fetch version='1.0' output-format='xml-platform' mapp
     </entity>
 </fetch>";
 
+// Retrieve agents schedule
 EntityCollection responseSchedule = _serviceClient.RetrieveMultipleAsync(new FetchExpression(scheduleFetchXml)).Result;
 List<KeyValuePair<string, string[]>> agentScheduleDict = new List<KeyValuePair<string, string[]>>();
 
@@ -133,11 +136,16 @@ foreach (var schedule in responseSchedule.Entities)
     var scheduleAgentId = schedule.Attributes["bxd_agentid"]?.ToString();
     var scheduleStart = schedule.Attributes["bxd_scheduledstart"]?.ToString();
     var scheduleEnd = schedule.Attributes["bxd_scheduledend"]?.ToString();
+    var agentName = schedule.GetAttributeValue<AliasedValue>("agent.bxd_name").Value.ToString();
+    var agentPrimaryPhone = schedule.GetAttributeValue<AliasedValue>("agent.bxd_primaryphone").Value.ToString();
 
     if (!string.IsNullOrEmpty(scheduleName) && !string.IsNullOrEmpty(scheduleTypeCode) && !string.IsNullOrEmpty(scheduleAgentId) && !string.IsNullOrEmpty(scheduleStart) && !string.IsNullOrEmpty(scheduleEnd))
     {
         // Add agent name as the key and other values as array of values
-        agentScheduleDict.Add(new KeyValuePair<string, string[]>(scheduleName, new string[] { scheduleTypeCode, scheduleAgentId, scheduleStart, scheduleEnd }));
+        if (agentName != null && agentPrimaryPhone != null)
+        {
+            agentScheduleDict.Add(new KeyValuePair<string, string[]>(scheduleName, new string[] { agentName, agentPrimaryPhone, scheduleTypeCode, scheduleAgentId, scheduleStart, scheduleEnd }));
+        }
     }
     else
     {
@@ -161,6 +169,7 @@ var fetchXml = $@"<fetch version='1.0' output-format='xml-platform' mapping='log
     </entity>
 </fetch>";
 
+// Retrieve agents skills
 EntityCollection responseSkills = _serviceClient.RetrieveMultipleAsync(new FetchExpression(fetchXml)).Result;
 List<KeyValuePair<string, string[]>> agentSkillsDict = new List<KeyValuePair<string, string[]>>();
 
@@ -176,7 +185,7 @@ foreach (var agent in responseSkills.Entities)
     if (!string.IsNullOrEmpty(agentName) && !string.IsNullOrEmpty(agentPrimaryPhone) && !string.IsNullOrEmpty(agentSkill))
     {
          // Add agent name as the key and other values as array of values
-        agentSkillsDict.Add(new KeyValuePair<string, string[]>(agentName, new string[] { agentPrimaryPhone, agentSkill, agentIsCurrentlyHandlingCall.ToString() }));
+        agentSkillsDict.Add(new KeyValuePair<string, string[]>(agentName, new string[] { agentName, agentPrimaryPhone, agentSkill, agentIsCurrentlyHandlingCall.ToString() }));
     }
     else
     {
@@ -188,6 +197,7 @@ app.MapPost("/api/incomingCall", async (
     [FromBody] EventGridEvent[] eventGridEvents,
     ILogger<Program> logger) =>
 {
+    // Process incoming call event
     foreach (var eventGridEvent in eventGridEvents)
     {
         logger.LogInformation($"Incoming Call event received.");
@@ -195,7 +205,7 @@ app.MapPost("/api/incomingCall", async (
         // Handle system events
         if (eventGridEvent.TryGetSystemEventData(out object eventData))
         {
-            // Handle the subscription validation event.
+            // Handle the subscription validation event for webhook configuration.
             if (eventData is SubscriptionValidationEventData subscriptionValidationEventData)
             {
                 var responseData = new SubscriptionValidationResponse
@@ -273,19 +283,17 @@ app.MapPost("/api/incomingCall", async (
             }
             if (dtmfEvent.Tone.Equals(DtmfTone.One) && dtmfEvent.SequenceId == 2)
             {
-                languageSelected = "English";
-                ACSorPoliceSelected = "Police";
+                issueSelected = "Police";
                 
                 logger.LogInformation($"Initializing the Call transfer...");
-                //await CheckAgentAvailabilityandTransfer(callConnectionMedia, answerCallResult, logger);
+                await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Two) && dtmfEvent.SequenceId == 2)
             {
-                languageSelected = "Spanish";
-                ACSorPoliceSelected = "ACSFmailyCourt";
+                issueSelected = "ACSFmailyCourt";
 
                 logger.LogInformation($"Initializing the Call transfer...");
-                // await CheckAgentAvailabilityandTransfer(callConnectionMedia, answerCallResult, logger);
+                await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Three) && dtmfEvent.SequenceId == 2)
             {
@@ -489,23 +497,51 @@ async Task StartContinousDTMFRecognition(CallAutomationClient client, string cal
 
 async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueSkill, AnswerCallResult answerCallResult, ILogger<Program> logger)
 {
-   // Check if the agent is available from dataverse
+    // Check which agent is available based on schedule
+    List<KeyValuePair<string, string>> agentAvailableAgentList = new List<KeyValuePair<string, string>>();
+    
+    foreach (var agent in agentScheduleDict)
+    {
+        var agentName = agent.Key;
+        var agentPrimaryPhone = agent.Value[1];
+        var agentSkill = agent.Value[2];
+        var agentId = agent.Value[3];
+        var agentStart = agent.Value[4];
+        var agentEnd = agent.Value[5];
+
+        // Check now is between agentStart and agentEnd, add the agent to the list
+        if (DateTime.Now >= DateTime.Parse(agentStart) && DateTime.Now <= DateTime.Parse(agentEnd))
+        {
+            // Add the agent to the list
+            agentAvailableAgentList.Add(new KeyValuePair<string, string>(agentName, agentPrimaryPhone));
+        }
+    }
+
+    // Check if the agent is available from dataverse
     foreach (var agent in agentSkillsDict)
     {
+        var agentName = agent.Key;
         var agentPrimaryPhone = agent.Value[0];
         var agentSkill = agent.Value[1];
         var agentIsCurrentlyHandlingCall = agent.Value[2];
 
-        // If the agent is available, transfer the call to the agent
-        if (agentIsCurrentlyHandlingCall == "false"){
-            CommunicationIdentifier transferDestination = new PhoneNumberIdentifier(agentPrimaryPhone);
-            TransferCallToParticipantResult result = await answerCallResult.CallConnection.TransferCallToParticipantAsync(transferDestination);
-            logger.LogInformation($"Transfer call initiated: {result.OperationContext}");
-        }
-        else
+        if (agentAvailableAgentList.Any(agent => agent.Key == agentName))
         {
-            logger.LogInformation($"Agent is currently handling a call. Trying next agent...");
-        }
+            if (agentSkill == languageSkill && agentSkill == issueSkill)
+            {
+                // If the agent is available, transfer the call to the agent
+                if (agentIsCurrentlyHandlingCall == "false")
+                {
+                    CommunicationIdentifier transferDestination = new PhoneNumberIdentifier(agentPrimaryPhone);
+                    TransferCallToParticipantResult result = await answerCallResult.CallConnection.TransferCallToParticipantAsync(transferDestination);
+                    logger.LogInformation($"Transfer call initiated: {result.OperationContext}");
+                }
+                else
+                {
+                    logger.LogInformation($"Agent is currently handling a call. Trying next agent...");
+                }
+            }
+        }   
     }
 }
 
