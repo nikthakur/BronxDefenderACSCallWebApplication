@@ -15,6 +15,7 @@ using System.Net.Http.Headers;
 using Microsoft.Xrm.Sdk.Query;
 using Microsoft.PowerPlatform.Dataverse.Client.Extensions;
 using Microsoft.Xrm.Sdk;
+using CliWrap.EventStream;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -534,6 +535,8 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
                     CommunicationIdentifier transferDestination = new PhoneNumberIdentifier(agentPrimaryPhone);
                     TransferCallToParticipantResult result = await answerCallResult.CallConnection.TransferCallToParticipantAsync(transferDestination);
                     logger.LogInformation($"Transfer call initiated: {result.OperationContext}");
+                    // exit for loop
+                    
                 }
                 else
                 {
