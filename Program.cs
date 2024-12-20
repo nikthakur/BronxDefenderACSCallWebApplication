@@ -173,24 +173,32 @@ app.MapPost("/api/incomingCall", async (
             if (dtmfEvent.Tone.Equals(DtmfTone.One) && dtmfEvent.SequenceId == 1)
             {
                 languageSelected = "English";
+                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "1", "", logger);
                 await HandleRecognizeAsync(callConnectionMedia, callerId, callerIssuePrompt);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Two) && dtmfEvent.SequenceId == 1)
             {
                 languageSelected = "Spanish";
+                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "2", "", logger);
                 await HandleRecognizeAsync(callConnectionMedia, callerId, callerIssuePromptSpanish);
+            }
+            else if (dtmfEvent.Tone.Equals(DtmfTone.Three) && dtmfEvent.SequenceId == 1)
+            {
+                languageSelected = "English";
+                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "3", "", logger);
+                await HandleRecognizeAsync(callConnectionMedia, callerId, callerIssuePrompt);
             }
             if (dtmfEvent.Tone.Equals(DtmfTone.One) && dtmfEvent.SequenceId == 2)
             {
                 issueSelected = "Police";
-                
+                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "1", "1", logger);
                 logger.LogInformation($"Initializing the Call transfer...");
                 await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Two) && dtmfEvent.SequenceId == 2)
             {
-                issueSelected = "ACSFmailyCourt";
-
+                issueSelected = "ACS/FamilyCourt";
+                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "1", "2", logger);
                 logger.LogInformation($"Initializing the Call transfer...");
                 await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
@@ -198,12 +206,12 @@ app.MapPost("/api/incomingCall", async (
             {
                 if (languageSelected == "English")
                 {
-                    //await HandlePlayAsync(criminalVoicemail, criminalVoiceMailContext, callConnectionMedia);
+                    await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "1", "3", logger);
                     await HandleRecognizeAsync(callConnectionMedia, callerId, criminalVoicemail);
                 }
                 else if (languageSelected == "Spanish")
                 {
-                    //await HandlePlayAsync(criminalVoicemailSpanish, criminalVoiceMailContext, callConnectionMedia);
+                    await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "2", "3", logger);
                     await HandleRecognizeAsync(callConnectionMedia, callerId, criminalVoicemailSpanish);
                 }
                 
@@ -394,6 +402,32 @@ async Task StartContinousDTMFRecognition(CallAutomationClient client, string cal
     .StartContinuousDtmfRecognitionAsync(new PhoneNumberIdentifier(cId));
 }
 
+// Add a method to insert record in dataverse table
+async Task InsertRecordInDataverse(string connectionId, string phoneNumber, string languageSelected, string issueSelected, ILogger<Program> logger)
+{
+    var dataverseClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
+            .WithClientSecret(dataverseClientSecret)
+            .WithAuthority(new Uri($"https://login.microsoftonline.com/{dataverseTenantId}"))
+            .Build();
+
+    // Acquire token for Dataverse
+    var authResult = dataverseClient.AcquireTokenForClient(new[] { $"{dataverseUri}/.default" }).ExecuteAsync().Result;
+    var accessToken = authResult.AccessToken;
+
+    ILogger<ServiceClient> serviceClientLogger = app.Services.GetRequiredService<ILogger<ServiceClient>>();
+    ServiceClient _serviceClient = new ServiceClient(dataverseConnectionString);
+
+    // Create a new record in the dataverse table
+    Entity entity = new Entity("bxd_event");
+    entity["bxd_acscallconnectionid"] = connectionId;
+    entity["bxd_phonenumber"] = phoneNumber;
+    entity["bxd_languagepromptselectedcode"] = languageSelected;
+    entity["bxd_issuepromptselectedcode"] = issueSelected;
+
+    var response = _serviceClient.CreateAsync(entity).Result;
+    logger.LogInformation($"Record created in Dataverse: {response.ToString()}");
+}
+
 async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueSkill, AnswerCallResult answerCallResult, ILogger<Program> logger)
 {
     var dataverseClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
@@ -517,6 +551,7 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
         }
     }
 
+    bool isAgentAvailable = false;
     // Check if the agent is available from dataverse
     foreach (var agent in agentSkillsDict)
     {
@@ -536,7 +571,7 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
                     TransferCallToParticipantResult result = await answerCallResult.CallConnection.TransferCallToParticipantAsync(transferDestination);
                     logger.LogInformation($"Transfer call initiated: {result.OperationContext}");
                     // exit for loop
-                    
+                    break;
                 }
                 else
                 {
