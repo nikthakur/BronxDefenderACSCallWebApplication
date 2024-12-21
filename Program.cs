@@ -43,6 +43,8 @@ string criminalVoicemail = " Hello, you have reached the Bronx Defenders Early D
 string criminalVoicemailSpanish = "Hola, usted se ha comunicado con la línea directa del equipo de primera defensa de Los Bronx Defenders. Si tiene alguna pregunta o busca representación para un asunto en la cual no tiene representación, deje su nombre, número de teléfono y una breve explicación del problema. Lo más importante es que no hable con la policía o otros oficiales hasta haber hablado con un abogado.";
 string familyVoicemail = "You've reached the Bronx Defenders Family Defense hotline. Please leave your name and phone number so someone can get back to you.";
 string familyVoicemailSpanish = "Hola, Usted ha contactado a Bronx Defenders, la linea directa de la practica familiar. Por favor deje su nombre y su numero de telefono y alguien le devolvera la llamada. Gracias.";
+string otherVoicemail = "Please leave a message explaining your issue. If this concerns a legal matter, please do not speak to anyone until you have spoken to someone from our office. Thank you.";
+string otherVoicemailSpanish = "Por favor deje un mensaje con una explicación del problema.  Si esto es sobre un problema legal, no hable con otra persona antes de hablar con alguien de nuestra oficina.";
 string recordingPrompt = "You will be redirected to voicemail, start recording your message";
 string recordingPromptSpanish = "Se le redirigirá al correo de voz, comience a grabar su mensaje";
 string recordingStatusPrompt = "Recording Download Location : {_contentLocation}, Recording Delete Location: {_deleteLocation}";
@@ -66,17 +68,16 @@ string voiceMailRecordingDeleteLocation = "";
 string languageSelected = String.Empty;
 string issueSelected = String.Empty;
 
+string callConnectionId = String.Empty;
+
 var key = builder.Configuration.GetValue<string>("AzureOpenAIServiceKey");
 ArgumentNullException.ThrowIfNullOrEmpty(key);
 
 var endpoint = builder.Configuration.GetValue<string>("AzureOpenAIServiceEndpoint");
 ArgumentNullException.ThrowIfNullOrEmpty(endpoint);
 
-var ai_client = new OpenAI.OpenAIClient(new AzureKeyCredential(key));
-
 //Register and make CallAutomationClient accessible via dependency injection
 builder.Services.AddSingleton(client);
-builder.Services.AddSingleton(ai_client);
 var app = builder.Build();
 
 var devTunnelUri = builder.Configuration.GetValue<string>("DevTunnelUri");
@@ -133,6 +134,7 @@ app.MapPost("/api/incomingCall", async (
         if (answer_result.IsSuccess)
         {
             logger.LogInformation($"Call connected event received for connection id: {answer_result.SuccessResult.CallConnectionId}");
+            callConnectionId = answer_result.SuccessResult.CallConnectionId;
             var callConnectionMedia = answerCallResult.CallConnection.GetCallMedia();
             await HandlePlayAsync(helloPrompt, "Hello Prompt", callConnectionMedia);
             await HandleRecognizeAsync(callConnectionMedia, callerId, firstPrompt);
@@ -173,32 +175,32 @@ app.MapPost("/api/incomingCall", async (
             if (dtmfEvent.Tone.Equals(DtmfTone.One) && dtmfEvent.SequenceId == 1)
             {
                 languageSelected = "English";
-                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "1", "", logger);
+                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 0, logger);
                 await HandleRecognizeAsync(callConnectionMedia, callerId, callerIssuePrompt);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Two) && dtmfEvent.SequenceId == 1)
             {
                 languageSelected = "Spanish";
-                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "2", "", logger);
+                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 2, 0, logger);
                 await HandleRecognizeAsync(callConnectionMedia, callerId, callerIssuePromptSpanish);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Three) && dtmfEvent.SequenceId == 1)
             {
                 languageSelected = "English";
-                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "3", "", logger);
+                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 3, 0, logger);
                 await HandleRecognizeAsync(callConnectionMedia, callerId, callerIssuePrompt);
             }
             if (dtmfEvent.Tone.Equals(DtmfTone.One) && dtmfEvent.SequenceId == 2)
             {
                 issueSelected = "Police";
-                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "1", "1", logger);
+                await UpdateRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 1, logger);
                 logger.LogInformation($"Initializing the Call transfer...");
                 await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Two) && dtmfEvent.SequenceId == 2)
             {
                 issueSelected = "ACS/FamilyCourt";
-                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "1", "2", logger);
+                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 2, logger);
                 logger.LogInformation($"Initializing the Call transfer...");
                 await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
@@ -206,13 +208,13 @@ app.MapPost("/api/incomingCall", async (
             {
                 if (languageSelected == "English")
                 {
-                    await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "1", "3", logger);
-                    await HandleRecognizeAsync(callConnectionMedia, callerId, criminalVoicemail);
+                    await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 3, logger);
+                    await HandleRecognizeAsync(callConnectionMedia, callerId, otherVoicemail);
                 }
                 else if (languageSelected == "Spanish")
                 {
-                    await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, "2", "3", logger);
-                    await HandleRecognizeAsync(callConnectionMedia, callerId, criminalVoicemailSpanish);
+                    await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 2, 3, logger);
+                    await HandleRecognizeAsync(callConnectionMedia, callerId, otherVoicemailSpanish);
                 }
                 
                 Thread.Sleep(3000);
@@ -337,6 +339,7 @@ app.MapPost("/api/recordingFileStatus", async (
             voiceMailRecordingMetadataLocation = statusUpdated.RecordingStorageInfo.RecordingChunks[0].MetadataLocation;
             voiceMailRecordingDeleteLocation = statusUpdated.RecordingStorageInfo.RecordingChunks[0].DeleteLocation;
 
+            await UpdateRecordVoicemailValueInDataverse(callConnectionId, voiceMailRecordingContentLocation, logger);
             logger.LogInformation($"Recording Location: {voiceMailRecordingContentLocation}\n Recording Metadata: {voiceMailRecordingMetadataLocation}");
         }
     }
@@ -403,7 +406,7 @@ async Task StartContinousDTMFRecognition(CallAutomationClient client, string cal
 }
 
 // Add a method to insert record in dataverse table
-async Task InsertRecordInDataverse(string connectionId, string phoneNumber, string languageSelected, string issueSelected, ILogger<Program> logger)
+async Task InsertRecordInDataverse(string connectionId, string phoneNumber, int languageSelected, int issueSelected, ILogger<Program> logger)
 {
     var dataverseClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
             .WithClientSecret(dataverseClientSecret)
@@ -420,14 +423,108 @@ async Task InsertRecordInDataverse(string connectionId, string phoneNumber, stri
     // Create a new record in the dataverse table
     Entity entity = new Entity("bxd_event");
     entity["bxd_acscallconnectionid"] = connectionId;
-    entity["bxd_phonenumber"] = phoneNumber;
-    entity["bxd_languagepromptselectedcode"] = languageSelected;
-    entity["bxd_issuepromptselectedcode"] = issueSelected;
+    entity["bxd_phonenumber"] = phoneNumber.Substring(2);
+    entity.Attributes.Add("bxd_languagepromptselectioncode", new OptionSetValue(languageSelected));
+    if (issueSelected != 0)
+    {
+        entity.Attributes.Add("bxd_issuepromptselectioncode", new OptionSetValue(issueSelected));
+    }
 
     var response = _serviceClient.CreateAsync(entity).Result;
     logger.LogInformation($"Record created in Dataverse: {response.ToString()}");
 }
 
+// Update dataverse record
+async Task UpdateRecordInDataverse(string connectionId, string phoneNumber, int languageSelected, int issueSelected, ILogger<Program> logger)
+{
+    var dataverseClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
+            .WithClientSecret(dataverseClientSecret)
+            .WithAuthority(new Uri($"https://login.microsoftonline.com/{dataverseTenantId}"))
+            .Build();
+
+    // Acquire token for Dataverse
+    var authResult = dataverseClient.AcquireTokenForClient(new[] { $"{dataverseUri}/.default" }).ExecuteAsync().Result;
+    var accessToken = authResult.AccessToken;
+
+    ILogger<ServiceClient> serviceClientLogger = app.Services.GetRequiredService<ILogger<ServiceClient>>();
+    ServiceClient _serviceClient = new ServiceClient(dataverseConnectionString);
+
+    // Create a new record in the dataverse table
+    // Update the record in the dataverse table using connection id
+
+    var existingRecord = _serviceClient.RetrieveMultipleAsync(new QueryExpression("bxd_event")
+    {
+        ColumnSet = new ColumnSet("bxd_eventid"),
+        Criteria = new FilterExpression
+        {
+            Conditions =
+            {
+                new ConditionExpression("bxd_acscallconnectionid", ConditionOperator.Equal, connectionId)
+            }
+        }
+    }).Result.Entities.FirstOrDefault();
+
+    if (existingRecord == null)
+    {
+        logger.LogInformation($"Record not found in Dataverse for connection id: {connectionId}");
+        return;
+    }
+
+    if (existingRecord != null)
+    {
+        existingRecord.Attributes.Add("bxd_issuepromptselectioncode", new OptionSetValue(issueSelected));
+        
+        var response = _serviceClient.UpdateAsync(existingRecord);
+        logger.LogInformation($"Record updated with the issue selected: {response.ToString()}");
+    }
+}
+
+// Update dataverse record
+async Task UpdateRecordVoicemailValueInDataverse(string connectionId, string voicemailUrl, ILogger<Program> logger)
+{
+    var dataverseClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
+            .WithClientSecret(dataverseClientSecret)
+            .WithAuthority(new Uri($"https://login.microsoftonline.com/{dataverseTenantId}"))
+            .Build();
+
+    // Acquire token for Dataverse
+    var authResult = dataverseClient.AcquireTokenForClient(new[] { $"{dataverseUri}/.default" }).ExecuteAsync().Result;
+    var accessToken = authResult.AccessToken;
+
+    ILogger<ServiceClient> serviceClientLogger = app.Services.GetRequiredService<ILogger<ServiceClient>>();
+    ServiceClient _serviceClient = new ServiceClient(dataverseConnectionString);
+
+    // Create a new record in the dataverse table
+    // Update the record in the dataverse table using connection id
+
+    var existingRecord = _serviceClient.RetrieveMultipleAsync(new QueryExpression("bxd_event")
+    {
+        ColumnSet = new ColumnSet("bxd_eventid"),
+        Criteria = new FilterExpression
+        {
+            Conditions =
+            {
+                new ConditionExpression("bxd_acscallconnectionid", ConditionOperator.Equal, connectionId)
+            }
+        }
+    }).Result.Entities.FirstOrDefault();
+
+    if (existingRecord == null)
+    {
+        logger.LogInformation($"Record not found in Dataverse for connection id: {connectionId}");
+        return;
+    }
+
+    if (existingRecord != null)
+    {
+        existingRecord.Attributes.Add("bxd_voicemailurl", voicemailUrl);
+        
+        var response = _serviceClient.UpdateAsync(existingRecord);
+        logger.LogInformation($"Record updated with voicemail link: {response.ToString()}");
+    }
+}
+
+// Check agent availability and transfer the call
 async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueSkill, AnswerCallResult answerCallResult, ILogger<Program> logger)
 {
     var dataverseClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
@@ -454,7 +551,7 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
             <attribute name='bxd_agentid' />
             <filter type='and'>
                 <condition attribute='statecode' operator='eq' value='0' />
-                <condition attribute='bxd_scheduledstart' operator='on' value='12/18/2024' />
+                <condition attribute='bxd_scheduledstart' operator='today' />
             </filter>
             <link-entity name='bxd_agent' from='bxd_agentid' to='bxd_agentid' alias='agent'>
                 <attribute name='bxd_name' />
