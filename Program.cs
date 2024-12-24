@@ -16,6 +16,7 @@ using Microsoft.Xrm.Sdk.Query;
 using Microsoft.PowerPlatform.Dataverse.Client.Extensions;
 using Microsoft.Xrm.Sdk;
 using CliWrap.EventStream;
+using Microsoft.AspNetCore.Identity;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -67,6 +68,8 @@ string voiceMailRecordingDeleteLocation = "";
 
 string languageSelected = String.Empty;
 string issueSelected = String.Empty;
+string selectedAgentId = String.Empty;
+bool callTransferredToAgent = false;
 
 string callConnectionId = String.Empty;
 
@@ -200,45 +203,16 @@ app.MapPost("/api/incomingCall", async (
             else if (dtmfEvent.Tone.Equals(DtmfTone.Two) && dtmfEvent.SequenceId == 2)
             {
                 issueSelected = "ACS/FamilyCourt";
-                await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 2, logger);
+                await UpdateRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 2, logger);
                 logger.LogInformation($"Initializing the Call transfer...");
                 await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Three) && dtmfEvent.SequenceId == 2)
             {
-                if (languageSelected == "English")
-                {
-                    await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 3, logger);
-                    await HandleRecognizeAsync(callConnectionMedia, callerId, otherVoicemail);
-                }
-                else if (languageSelected == "Spanish")
-                {
-                    await InsertRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 2, 3, logger);
-                    await HandleRecognizeAsync(callConnectionMedia, callerId, otherVoicemailSpanish);
-                }
-                
-                Thread.Sleep(3000);
-                // Beep sound
-                var beepAudioFile = "https://voicemailrecordingstgacc.blob.core.windows.net/bronxdefendersvoicemails/audiofiles/beep.wav";
-                await HandlePlayAudioAsync(beepAudioFile, criminalVoiceMailContext, callConnectionMedia);
-
-                //Transfer to voicemail
-                var serverCallId = client.GetCallConnection(answerCallResult.CallConnection.CallConnectionId).GetCallConnectionProperties().Value.ServerCallId;
-                var callLocator = new ServerCallLocator(serverCallId);
-
-                StartRecordingOptions recordingOptions = new StartRecordingOptions(callLocator)
-                {
-                    RecordingContent = RecordingContent.Audio,
-                    RecordingChannel = RecordingChannel.Unmixed,
-                    RecordingFormat = RecordingFormat.Wav,
-                    RecordingStorage = RecordingStorage.CreateAzureBlobContainerRecordingStorage(new Uri("https://voicemailrecordingstgacc.blob.core.windows.net/bronxdefendersvoicemails"))
-                };
-
-                Response<RecordingStateResult> recordingResponse = await client.GetCallRecording()
-                    .StartAsync(recordingOptions);
-
-                var recordingId = recordingResponse.Value.RecordingId;
-                logger.LogInformation($"Recording started. RecordingId: {recordingId}");
+                issueSelected = "Other";
+                await UpdateRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 3, logger);
+                logger.LogInformation($"Initializing the Call transfer...");
+                await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
         });
         client.GetEventProcessor().AttachOngoingEventProcessor<PlayFailed>(answerCallResult.CallConnection.CallConnectionId, async (playFailedEvent) =>
@@ -246,35 +220,43 @@ app.MapPost("/api/incomingCall", async (
             logger.LogInformation($"Play failed event received for connection id: {playFailedEvent.CallConnectionId}. Hanging up call...");
             await answerCallResult.CallConnection.HangUpAsync(true);
         });
+        client.GetEventProcessor().AttachOngoingEventProcessor<CallDisconnected>(answerCallResult.CallConnection.CallConnectionId, async (callDisconnectedEvent) =>
+        {
+            logger.LogInformation($"Call transfer accepted event received for connection id: {callDisconnectedEvent.CallConnectionId}.");
+            if (callTransferredToAgent)
+            {
+                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "false", logger);
+            }   
+        });
+        client.GetEventProcessor().AttachOngoingEventProcessor<AnswerFailed>(answerCallResult.CallConnection.CallConnectionId, async (answerFailedEvent) =>
+        {
+            logger.LogInformation($"Answer failed event received for connection id: {answerFailedEvent.CallConnectionId}.");
+            if (callTransferredToAgent)
+            {
+                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "false", logger);
+            }   
+        });
         client.GetEventProcessor().AttachOngoingEventProcessor<CallTransferAccepted>(answerCallResult.CallConnection.CallConnectionId, async (callTransferAcceptedEvent) =>
         {
             logger.LogInformation($"Call transfer accepted event received for connection id: {callTransferAcceptedEvent.CallConnectionId}.");
+            logger.LogInformation($"Call transfer accepted event received for connection id: {callTransferAcceptedEvent.ResultInformation?.Message}.");
+            logger.LogInformation($"Call transfer accepted event received for connection id: {callTransferAcceptedEvent.Transferee}.");
         });
         // Try different phone number instead of same one.
         client.GetEventProcessor().AttachOngoingEventProcessor<CallTransferFailed>(answerCallResult.CallConnection.CallConnectionId, async (callTransferFailedEvent) =>
         {
             logger.LogInformation($"Call transfer failed event received for connection id: {callTransferFailedEvent.CallConnectionId}.");
 
+            if (callTransferredToAgent)
+            {
+                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "false", logger);
+            }   
+
             var resultInformation = callTransferFailedEvent.ResultInformation;
             logger.LogError("Encountered error during call transfer, message={msg}, code={code}, subCode={subCode}", resultInformation?.Message, resultInformation?.Code, resultInformation?.SubCode);
 
-            // Transfer to voicemail
-            var serverCallId = client.GetCallConnection(answerCallResult.CallConnection.CallConnectionId).GetCallConnectionProperties().Value.ServerCallId;
-            var callLocator = new ServerCallLocator(serverCallId);
-            StartRecordingOptions recordingOptions = new StartRecordingOptions(callLocator)
-            {
-                RecordingContent = RecordingContent.Audio,
-                RecordingChannel = RecordingChannel.Unmixed,
-                RecordingFormat = RecordingFormat.Wav,
-                RecordingStorage = RecordingStorage.CreateAzureBlobContainerRecordingStorage(new Uri("https://voicemailrecordingstgacc.blob.core.windows.net/bronxdefendersvoicemails"))
-            };
-
-            Response<RecordingStateResult> recordingResponse = await client.GetCallRecording()
-            .StartAsync(recordingOptions);
-
-            var recordingId = recordingResponse.Value.RecordingId;
-            logger.LogInformation($"Recording started. RecordingId: {recordingId}");
-
+            // Transfer call to voicemail
+            await TransferToVoicemail(answerCallResult, callerId, logger);
         });
         client.GetEventProcessor().AttachOngoingEventProcessor<RecognizeFailed>(answerCallResult.CallConnection.CallConnectionId, async (recognizeFailedEvent) =>
         {
@@ -353,6 +335,43 @@ app.MapGet("/api/downloadVoicemail", async (
     callRecording.DownloadTo(new Uri(voiceMailRecordingContentLocation), "Recording_File.wav");
     return Results.Ok();
 });
+
+async Task TransferToVoicemail(AnswerCallResult answerCallResult, string callerId, ILogger<Program> logger)
+{
+    // Transfer to voicemail
+    var callConnectionMedia = answerCallResult.CallConnection.GetCallMedia();
+    if (languageSelected == "English")
+    {
+        await UpdateRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 3, logger);
+        await HandleRecognizeAsync(callConnectionMedia, callerId, otherVoicemail);
+    }
+    else if (languageSelected == "Spanish")
+    {
+        await UpdateRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 2, 3, logger);
+        await HandleRecognizeAsync(callConnectionMedia, callerId, otherVoicemailSpanish);
+    }
+    
+    Thread.Sleep(3000);
+    // Beep sound
+    var beepAudioFile = "https://voicemailrecordingstgacc.blob.core.windows.net/bronxdefendersvoicemails/audiofiles/beep.wav";
+    await HandlePlayAudioAsync(beepAudioFile, criminalVoiceMailContext, callConnectionMedia);
+
+    var serverCallId = client.GetCallConnection(answerCallResult.CallConnection.CallConnectionId).GetCallConnectionProperties().Value.ServerCallId;
+    var callLocator = new ServerCallLocator(serverCallId);
+    StartRecordingOptions recordingOptions = new StartRecordingOptions(callLocator)
+    {
+        RecordingContent = RecordingContent.Audio,
+        RecordingChannel = RecordingChannel.Unmixed,
+        RecordingFormat = RecordingFormat.Wav,
+        RecordingStorage = RecordingStorage.CreateAzureBlobContainerRecordingStorage(new Uri("https://voicemailrecordingstgacc.blob.core.windows.net/bronxdefendersvoicemails"))
+    };
+
+    Response<RecordingStateResult> recordingResponse = await client.GetCallRecording()
+    .StartAsync(recordingOptions);
+
+    var recordingId = recordingResponse.Value.RecordingId;
+    logger.LogInformation($"Recording started. RecordingId: {recordingId}");
+}
 
 async Task HandleRecognizeAsync(CallMedia callConnectionMedia, string callerId, string message)
 {
@@ -524,6 +543,49 @@ async Task UpdateRecordVoicemailValueInDataverse(string connectionId, string voi
     }
 }
 
+async Task UpdateAgentAvailabilityValueInDataverse(string agentid, string availability, ILogger<Program> logger)
+{
+    var dataverseClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
+            .WithClientSecret(dataverseClientSecret)
+            .WithAuthority(new Uri($"https://login.microsoftonline.com/{dataverseTenantId}"))
+            .Build();
+
+    // Acquire token for Dataverse
+    var authResult = dataverseClient.AcquireTokenForClient(new[] { $"{dataverseUri}/.default" }).ExecuteAsync().Result;
+    var accessToken = authResult.AccessToken;
+
+    ILogger<ServiceClient> serviceClientLogger = app.Services.GetRequiredService<ILogger<ServiceClient>>();
+    ServiceClient _serviceClient = new ServiceClient(dataverseConnectionString);
+
+    // Create a new record in the dataverse table
+    // Update the record in the dataverse table using connection id
+
+    var existingRecord = _serviceClient.RetrieveMultipleAsync(new QueryExpression("bxd_agent")
+    {
+        ColumnSet = new ColumnSet("bxd_agentid"),
+        Criteria = new FilterExpression
+        {
+            Conditions =
+            {
+                new ConditionExpression("bxd_agentid", ConditionOperator.Equal, agentid)
+            }
+        }
+    }).Result.Entities.FirstOrDefault();
+
+    if (existingRecord == null)
+    {
+        logger.LogInformation($"Record not found in Dataverse for agent id: {agentid}");
+        return;
+    }
+
+    if (existingRecord != null)
+    {
+        existingRecord.Attributes.Add("bxd_iscurrentlyhandlingcall", availability);
+        
+        var response = _serviceClient.UpdateAsync(existingRecord);
+    }
+}
+
 // Check agent availability and transfer the call
 async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueSkill, AnswerCallResult answerCallResult, ILogger<Program> logger)
 {
@@ -551,7 +613,7 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
             <attribute name='bxd_agentid' />
             <filter type='and'>
                 <condition attribute='statecode' operator='eq' value='0' />
-                <condition attribute='bxd_scheduledstart' operator='today' />
+                <condition attribute='bxd_scheduledstart' operator='on' value='12/23/2024'/>
             </filter>
             <link-entity name='bxd_agent' from='bxd_agentid' to='bxd_agentid' alias='agent'>
                 <attribute name='bxd_name' />
@@ -618,10 +680,10 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
         var agentSkill = agent.GetAttributeValue<AliasedValue>("skills.bxd_name").Value.ToString();
         var agentSkillsId = agent.GetAttributeValue<AliasedValue>("skills.bxd_skillsid").Value.ToString();
 
-        if (!string.IsNullOrEmpty(agentName) && !string.IsNullOrEmpty(agentPrimaryPhone) && !string.IsNullOrEmpty(agentSkill))
+        if (!string.IsNullOrEmpty(agentId) && !string.IsNullOrEmpty(agentName) && !string.IsNullOrEmpty(agentPrimaryPhone) && !string.IsNullOrEmpty(agentSkill))
         {
             // Add agent name as the key and other values as array of values
-            agentSkillsDict.Add(new KeyValuePair<string, string[]>(agentName, new string[] { agentName, agentPrimaryPhone, agentSkill, agentIsCurrentlyHandlingCall.ToString() }));
+            agentSkillsDict.Add(new KeyValuePair<string, string[]>(agentName, new string[] { agentId, agentName, agentPrimaryPhone, agentSkill, agentIsCurrentlyHandlingCall.ToString() }));
         }
         else
         {
@@ -652,10 +714,11 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
     // Check if the agent is available from dataverse
     foreach (var agent in agentSkillsDict)
     {
-        var agentName = agent.Value[0];
-        var agentPrimaryPhone = agent.Value[1];
-        var agentSkill = agent.Value[2];
-        var agentIsCurrentlyHandlingCall = agent.Value[3];
+        var agentId = agent.Value[0];
+        var agentName = agent.Value[1];
+        var agentPrimaryPhone = agent.Value[2];
+        var agentSkill = agent.Value[3];
+        var agentIsCurrentlyHandlingCall = agent.Value[4];
 
         if (agentAvailableAgentList.Any(agent => agent.Key == agentName))
         {
@@ -664,8 +727,12 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
                 // If the agent is available, transfer the call to the agent
                 if (agentIsCurrentlyHandlingCall == "False")
                 {
+                    selectedAgentId = agentId;
+                    callTransferredToAgent = true;
+
                     CommunicationIdentifier transferDestination = new PhoneNumberIdentifier(agentPrimaryPhone);
                     TransferCallToParticipantResult result = await answerCallResult.CallConnection.TransferCallToParticipantAsync(transferDestination);
+                    await UpdateAgentAvailabilityValueInDataverse(agentId, "Yes", logger);
                     logger.LogInformation($"Transfer call initiated: {result.OperationContext}");
                     // exit for loop
                     break;
