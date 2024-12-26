@@ -225,7 +225,7 @@ app.MapPost("/api/incomingCall", async (
             logger.LogInformation($"Call transfer accepted event received for connection id: {callDisconnectedEvent.CallConnectionId}.");
             if (callTransferredToAgent)
             {
-                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "false", logger);
+                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "False", logger);
             }   
         });
         client.GetEventProcessor().AttachOngoingEventProcessor<AnswerFailed>(answerCallResult.CallConnection.CallConnectionId, async (answerFailedEvent) =>
@@ -233,7 +233,7 @@ app.MapPost("/api/incomingCall", async (
             logger.LogInformation($"Answer failed event received for connection id: {answerFailedEvent.CallConnectionId}.");
             if (callTransferredToAgent)
             {
-                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "false", logger);
+                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "False", logger);
             }   
         });
         client.GetEventProcessor().AttachOngoingEventProcessor<CallTransferAccepted>(answerCallResult.CallConnection.CallConnectionId, async (callTransferAcceptedEvent) =>
@@ -249,7 +249,7 @@ app.MapPost("/api/incomingCall", async (
 
             if (callTransferredToAgent)
             {
-                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "false", logger);
+                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "False", logger);
             }   
 
             var resultInformation = callTransferFailedEvent.ResultInformation;
@@ -363,6 +363,7 @@ async Task TransferToVoicemail(AnswerCallResult answerCallResult, string callerI
         RecordingContent = RecordingContent.Audio,
         RecordingChannel = RecordingChannel.Unmixed,
         RecordingFormat = RecordingFormat.Wav,
+
         RecordingStorage = RecordingStorage.CreateAzureBlobContainerRecordingStorage(new Uri("https://voicemailrecordingstgacc.blob.core.windows.net/bronxdefendersvoicemails"))
     };
 
@@ -373,6 +374,7 @@ async Task TransferToVoicemail(AnswerCallResult answerCallResult, string callerI
     logger.LogInformation($"Recording started. RecordingId: {recordingId}");
 }
 
+// Method to handle recognize
 async Task HandleRecognizeAsync(CallMedia callConnectionMedia, string callerId, string message)
 {
     // Play greeting message
@@ -394,6 +396,7 @@ async Task HandleRecognizeAsync(CallMedia callConnectionMedia, string callerId, 
     var recognize_result = await callConnectionMedia.StartRecognizingAsync(recognizeOptions);
 }
 
+// Method to play text message
 async Task HandlePlayAsync(string textToPlay, string context, CallMedia callConnectionMedia)
 {
     // Play message
@@ -406,6 +409,7 @@ async Task HandlePlayAsync(string textToPlay, string context, CallMedia callConn
     await callConnectionMedia.PlayToAllAsync(playOptions);
 }
 
+// Method to play audio file (Beep.wav)
 async Task HandlePlayAudioAsync(string audioFile, string context, CallMedia callConnectionMedia)
 {
     // Play message
@@ -731,9 +735,9 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
                     callTransferredToAgent = true;
 
                     CommunicationIdentifier transferDestination = new PhoneNumberIdentifier(agentPrimaryPhone);
-                    TransferCallToParticipantResult result = await answerCallResult.CallConnection.TransferCallToParticipantAsync(transferDestination);
-                    await UpdateAgentAvailabilityValueInDataverse(agentId, "Yes", logger);
-                    logger.LogInformation($"Transfer call initiated: {result.OperationContext}");
+                    //TransferCallToParticipantResult result = await answerCallResult.CallConnection.TransferCallToParticipantAsync(transferDestination);
+                    await UpdateAgentAvailabilityValueInDataverse(agentId, "True", logger);
+                    //logger.LogInformation($"Transfer call initiated: {result.OperationContext}");
                     // exit for loop
                     break;
                 }
