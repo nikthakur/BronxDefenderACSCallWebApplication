@@ -15,8 +15,11 @@ using System.Net.Http.Headers;
 using Microsoft.Xrm.Sdk.Query;
 using Microsoft.PowerPlatform.Dataverse.Client.Extensions;
 using Microsoft.Xrm.Sdk;
+using System.Text.Json;
 using CliWrap.EventStream;
 using Microsoft.AspNetCore.Identity;
+using Azure.Communication.JobRouter;
+using Microsoft.Crm.Sdk.Messages;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -71,6 +74,7 @@ string issueSelected = String.Empty;
 string selectedAgentId = String.Empty;
 bool callTransferredToAgent = false;
 
+AnswerCallResult answerCallResult;
 string callConnectionId = String.Empty;
 
 var key = builder.Configuration.GetValue<string>("AzureOpenAIServiceKey");
@@ -96,6 +100,9 @@ var dataverseClientSecret = builder.Configuration.GetValue<string>("DataverseCli
 var dataverseTenantId = builder.Configuration.GetValue<string>("DataverseTenantId");
 var dataverseConnectionString = builder.Configuration.GetValue<string>("DataverseConnectionString");
     
+var jobRouterClient = new JobRouterClient(acsConnectionString);
+var jobRouterAdministrationClient = new JobRouterAdministrationClient(acsConnectionString);
+
 app.MapPost("/api/incomingCall", async (
     [FromBody] EventGridEvent[] eventGridEvents,
     ILogger<Program> logger) =>
@@ -129,21 +136,45 @@ app.MapPost("/api/incomingCall", async (
             CallIntelligenceOptions = new CallIntelligenceOptions() { CognitiveServicesEndpoint = new Uri(cognitiveServicesEndpoint) }
         };
 
-        AnswerCallResult answerCallResult = await client.AnswerCallAsync(options);
+        answerCallResult = await client.AnswerCallAsync(options);
         logger.LogInformation($"Answered call for connection id: {answerCallResult.CallConnection.CallConnectionId}");
 
         //Use EventProcessor to process CallConnected event
         var answer_result = await answerCallResult.WaitForEventProcessorAsync();
         if (answer_result.IsSuccess)
         {
-            logger.LogInformation($"Call connected event received for connection id: {answer_result.SuccessResult.CallConnectionId}");
             callConnectionId = answer_result.SuccessResult.CallConnectionId;
+            logger.LogInformation($"Call connected event received for connection id: {answer_result.SuccessResult.CallConnectionId}");
             var callConnectionMedia = answerCallResult.CallConnection.GetCallMedia();
             await HandlePlayAsync(helloPrompt, "Hello Prompt", callConnectionMedia);
             await HandleRecognizeAsync(callConnectionMedia, callerId, firstPrompt);
 
             // Start continuous DTMF recognition
             await StartContinousDTMFRecognition(client, answerCallResult.CallConnection.CallConnectionId, callerId);
+
+            // Provision workers with JobRouter
+
+            var distributionPolicy = await jobRouterAdministrationClient.CreateDistributionPolicyAsync(
+                new CreateDistributionPolicyOptions(
+                    distributionPolicyId: "BronxDefendersDistributionPolicy",
+                    offerExpiresAfter: TimeSpan.FromMinutes(1),
+                    mode: new LongestIdleMode())
+                {
+                    Name = "Bronx Defenders Distribution Policy",
+                }
+            );
+
+            var queue = await jobRouterAdministrationClient.CreateQueueAsync(
+                new CreateQueueOptions(queueId: "BF-Q1", distributionPolicyId: distributionPolicy.Value.Id)
+                {
+                    Name = "Bronx Defenders Call Queue",
+                }); 
+        
+            //await ProvisionWorkersWithJobRouter(jobRouterClient, "BF-Q1", logger);
+            /*await CreateWorker(jobRouterClient, "BF-Q1", "7fdf9acb-e8b0-ef11-b8e9-000d3a380890", "English", "Family", "", "", logger);
+            await CreateWorker(jobRouterClient, "BF-Q1", "7fdf9acb-e8b0-ef11-b8e9-000d3a380890", "English", "Police", "", "", logger);
+            await CreateWorker(jobRouterClient, "BF-Q1", "df655973-22b7-ef11-b8e9-000d3a380890", "English", "Other", "", "", logger);*/
+            
         }
         client.GetEventProcessor().AttachOngoingEventProcessor<PlayCompleted>(answerCallResult.CallConnection.CallConnectionId, async (playCompletedEvent) =>
         {
@@ -198,21 +229,32 @@ app.MapPost("/api/incomingCall", async (
                 issueSelected = "Police";
                 await UpdateRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 1, logger);
                 logger.LogInformation($"Initializing the Call transfer...");
-                await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
+                await CreateJob(jobRouterClient, "BF-Q1", languageSelected, issueSelected, logger);
+
+                //await ProvisionWorkersWithJobRouter(jobRouterClient, "BF-Q1", logger);
+                //await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Two) && dtmfEvent.SequenceId == 2)
             {
                 issueSelected = "ACS/FamilyCourt";
                 await UpdateRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 2, logger);
                 logger.LogInformation($"Initializing the Call transfer...");
-                await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
+                await CreateJob(jobRouterClient, "BF-Q1", languageSelected, issueSelected, logger);
+                //await CreateWorker(jobRouterClient, "BF-Q1", "7fdf9acb-e8b0-ef11-b8e9-000d3a380890", "English", "Family", "", "", logger);
+                //await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
             else if (dtmfEvent.Tone.Equals(DtmfTone.Three) && dtmfEvent.SequenceId == 2)
             {
                 issueSelected = "Other";
                 await UpdateRecordInDataverse(answerCallResult.CallConnection.CallConnectionId, callerId, 1, 3, logger);
                 logger.LogInformation($"Initializing the Call transfer...");
-                await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
+
+                await CreateJob(jobRouterClient, "BF-Q1", languageSelected, issueSelected, logger);
+                                await CreateWorker(jobRouterClient, "BF-Q1", "7fdf9acb-e8b0-ef11-b8e9-000d3a380890", "English", "Family", "", "", logger);
+                            await CreateWorker(jobRouterClient, "BF-Q1", "df655973-22b7-ef11-b8e9-000d3a380890", "English", "Other", "", "", logger);
+                //var theWorker = await CreateWorker(jobRouterClient, "BF-Q1", "7fdf9acb-e8b0-ef11-b8e9-000d3a380890", languageSelected, issueSelected, "", "", logger);
+
+                //await CheckAgentAvailabilityandTransfer(languageSelected, issueSelected, answerCallResult, logger);
             }
         });
         client.GetEventProcessor().AttachOngoingEventProcessor<PlayFailed>(answerCallResult.CallConnection.CallConnectionId, async (playFailedEvent) =>
@@ -225,15 +267,15 @@ app.MapPost("/api/incomingCall", async (
             logger.LogInformation($"Call transfer accepted event received for connection id: {callDisconnectedEvent.CallConnectionId}.");
             if (callTransferredToAgent)
             {
-                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "False", logger);
-            }   
+                await SetCurrentlyHandlingCall(selectedAgentId, false, logger);
+            }
         });
         client.GetEventProcessor().AttachOngoingEventProcessor<AnswerFailed>(answerCallResult.CallConnection.CallConnectionId, async (answerFailedEvent) =>
         {
             logger.LogInformation($"Answer failed event received for connection id: {answerFailedEvent.CallConnectionId}.");
             if (callTransferredToAgent)
             {
-                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "False", logger);
+                await SetCurrentlyHandlingCall(selectedAgentId, false, logger);
             }   
         });
         client.GetEventProcessor().AttachOngoingEventProcessor<CallTransferAccepted>(answerCallResult.CallConnection.CallConnectionId, async (callTransferAcceptedEvent) =>
@@ -249,7 +291,7 @@ app.MapPost("/api/incomingCall", async (
 
             if (callTransferredToAgent)
             {
-                await UpdateAgentAvailabilityValueInDataverse(selectedAgentId, "False", logger);
+                await SetCurrentlyHandlingCall(selectedAgentId, false, logger);
             }   
 
             var resultInformation = callTransferFailedEvent.ResultInformation;
@@ -270,8 +312,10 @@ app.MapPost("/api/incomingCall", async (
             }
             else
             {
-                logger.LogInformation($"Recognize failed event received for connection id: {recognizeFailedEvent.CallConnectionId}. Playing goodbye message...");
-                await HandlePlayAsync(goodbyePrompt, goodbyeContext, callConnectionMedia);
+                logger.LogInformation($"Recognize failed event received for connection id: {recognizeFailedEvent.CallConnectionId}. Transferring to voicemail...");
+                // Transfer call to voicemail
+                await TransferToVoicemail(answerCallResult, callerId, logger);
+               // await HandlePlayAsync(goodbyePrompt, goodbyeContext, callConnectionMedia);
             }
         });
     }
@@ -326,6 +370,60 @@ app.MapPost("/api/recordingFileStatus", async (
         }
     }
     return Results.Ok($"Recording Download Location : {voiceMailRecordingContentLocation}, Recording Delete Location: {voiceMailRecordingDeleteLocation}");
+});
+
+app.MapPost("/api/workerOfferEvents", async (
+    [FromBody] EventGridEvent[] eventGridEvents,
+    ILogger<Program> logger) =>
+{
+    foreach (var eventGridEvent in eventGridEvents)
+    {
+        logger.LogInformation($"Incoming Call event received.");
+
+        // Handle system events
+        if (eventGridEvent.TryGetSystemEventData(out object eventData))
+        {
+            // Handle the subscription validation event.
+            if (eventData is SubscriptionValidationEventData subscriptionValidationEventData)
+            {
+                var responseData = new SubscriptionValidationResponse
+                {
+                    ValidationResponse = subscriptionValidationEventData.ValidationCode
+                };
+                return Results.Ok(responseData);
+            }
+
+            switch (eventGridEvent.EventType)
+            {
+                case "Microsoft.Communication.RouterWorkerOfferIssued":
+                    await Task.Delay(TimeSpan.FromSeconds(10));
+                    var worker = await jobRouterClient.GetWorkerAsync("df655973-22b7-ef11-b8e9-000d3a380890");
+                    
+                    // accepting the offer sent to `worker-1`
+
+                    foreach (var offer in worker.Value.Offers)
+                    {
+                        Response<AcceptJobOfferResult> acceptJobOfferResult = jobRouterClient.AcceptJobOffer(worker.Value.Id, offer.OfferId);
+                        Console.WriteLine($"Worker {worker.Value.Id} has an active offer for job {offer.JobId}");
+                    }
+
+                    break;
+                case "Microsoft.Communication.RouterWorkerOfferAccepted":
+                    logger.LogInformation($"Worker Offer Accepted event received for worker id:");
+                    CommunicationIdentifier transferDestination = new PhoneNumberIdentifier("+15109539764");
+                    var callConnection = client.GetCallConnection(callConnectionId); // Assign a valid call connection ID
+                    var tokenSource = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    TransferCallToParticipantResult result = await callConnection.TransferCallToParticipantAsync(transferDestination,tokenSource.Token);
+                    break;
+                case "Microsoft.Communication.JobRouter.RouterWorkerOfferDeclined":
+                    logger.LogInformation($"Worker Offer Declined event received for worker id");
+                    break;
+                default:
+                    break;
+            }
+        }       
+    }
+    return Results.Ok();
 });
 
 app.MapGet("/api/downloadVoicemail", async (
@@ -547,7 +645,7 @@ async Task UpdateRecordVoicemailValueInDataverse(string connectionId, string voi
     }
 }
 
-async Task UpdateAgentAvailabilityValueInDataverse(string agentid, string availability, ILogger<Program> logger)
+async Task SetCurrentlyHandlingCall(string agentid, bool availability, ILogger<Program> logger)
 {
     var dataverseClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
             .WithClientSecret(dataverseClientSecret)
@@ -584,7 +682,7 @@ async Task UpdateAgentAvailabilityValueInDataverse(string agentid, string availa
 
     if (existingRecord != null)
     {
-        existingRecord.Attributes.Add("bxd_iscurrentlyhandlingcall", availability);
+        existingRecord.Attributes.Add("bxd_iscurrentlyhandlingcall",  availability);
         
         var response = _serviceClient.UpdateAsync(existingRecord);
     }
@@ -617,7 +715,7 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
             <attribute name='bxd_agentid' />
             <filter type='and'>
                 <condition attribute='statecode' operator='eq' value='0' />
-                <condition attribute='bxd_scheduledstart' operator='on' value='12/23/2024'/>
+                <condition attribute='bxd_scheduledstart' operator='today'/>
             </filter>
             <link-entity name='bxd_agent' from='bxd_agentid' to='bxd_agentid' alias='agent'>
                 <attribute name='bxd_name' />
@@ -709,12 +807,12 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
         // Check now is between agentStart and agentEnd, add the agent to the list
         if (DateTime.Now >= DateTime.Parse(agentStart) && DateTime.Now <= DateTime.Parse(agentEnd))
         {
+            //await CreateJob(jobRouterClient, "BF-Q1", languageSkill, issueSkill, logger);
             // Add the agent to the list
             agentAvailableAgentList.Add(new KeyValuePair<string, string>(agentName, agentPrimaryPhone));
         }
     }
 
-    bool isAgentAvailable = false;
     // Check if the agent is available from dataverse
     foreach (var agent in agentSkillsDict)
     {
@@ -736,7 +834,7 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
 
                     CommunicationIdentifier transferDestination = new PhoneNumberIdentifier(agentPrimaryPhone);
                     //TransferCallToParticipantResult result = await answerCallResult.CallConnection.TransferCallToParticipantAsync(transferDestination);
-                    await UpdateAgentAvailabilityValueInDataverse(agentId, "True", logger);
+                    await SetCurrentlyHandlingCall(agentId, true, logger);
                     //logger.LogInformation($"Transfer call initiated: {result.OperationContext}");
                     // exit for loop
                     break;
@@ -748,6 +846,165 @@ async Task CheckAgentAvailabilityandTransfer(string languageSkill, string issueS
             }
         }   
     }
+}
+
+async Task ProvisionWorkersWithJobRouter(JobRouterClient routerClient, string queueId, ILogger<Program> logger)
+{
+    var dataverseClient = ConfidentialClientApplicationBuilder.Create(dataverseClientId)
+            .WithClientSecret(dataverseClientSecret)
+            .WithAuthority(new Uri($"https://login.microsoftonline.com/{dataverseTenantId}"))
+            .Build();
+
+    // Acquire token for Dataverse
+    var authResult = dataverseClient.AcquireTokenForClient(new[] { $"{dataverseUri}/.default" }).ExecuteAsync().Result;
+    var accessToken = authResult.AccessToken;
+
+    ILogger<ServiceClient> serviceClientLogger = app.Services.GetRequiredService<ILogger<ServiceClient>>();
+    ServiceClient _serviceClient = new ServiceClient(dataverseConnectionString);
+
+    //create a fetchxml query to retrieve agent schedule
+    var scheduleFetchXml = $@"<fetch version='1.0' output-format='xml-platform' mapping='logical' distinct='false'>
+        <entity name='bxd_schedule'>
+            <attribute name='statecode' />
+            <attribute name='bxd_scheduleid' />
+            <attribute name='bxd_name' />
+            <attribute name='bxd_scheduledstart' />
+            <attribute name='bxd_scheduledend' />
+            <attribute name='bxd_availabilitytypecode' />
+            <attribute name='bxd_agentid' />
+            <filter type='and'>
+                <condition attribute='statecode' operator='eq' value='0' />
+                <condition attribute='bxd_scheduledstart' operator='today'/>
+            </filter>
+            <link-entity name='bxd_agent' from='bxd_agentid' to='bxd_agentid' alias='agent'>
+                <attribute name='bxd_name' />
+                <attribute name='bxd_primaryphone' />
+            </link-entity>
+        </entity>
+    </fetch>";
+
+    // Retrieve agents schedule
+    EntityCollection responseSchedule = _serviceClient.RetrieveMultipleAsync(new FetchExpression(scheduleFetchXml)).Result;
+    List<KeyValuePair<string, string[]>> agentScheduleDict = new List<KeyValuePair<string, string[]>>();
+
+    foreach (var schedule in responseSchedule.Entities)
+    {
+        var scheduleId = schedule.Attributes["bxd_scheduleid"]?.ToString();
+        var scheduleName = schedule.Attributes["bxd_name"]?.ToString();
+        var scheduleTypeCode = schedule.Attributes["bxd_availabilitytypecode"]?.ToString();
+        var scheduleAgentId = schedule.Attributes["bxd_agentid"]?.ToString();
+        var scheduleStart = schedule.Attributes["bxd_scheduledstart"]?.ToString();
+        var scheduleEnd = schedule.Attributes["bxd_scheduledend"]?.ToString();
+        var agentName = schedule.GetAttributeValue<AliasedValue>("agent.bxd_name").Value.ToString();
+        var agentPrimaryPhone = schedule.GetAttributeValue<AliasedValue>("agent.bxd_primaryphone").Value.ToString();
+
+        if (!string.IsNullOrEmpty(scheduleName) && !string.IsNullOrEmpty(scheduleTypeCode) && !string.IsNullOrEmpty(scheduleAgentId) && !string.IsNullOrEmpty(scheduleStart) && !string.IsNullOrEmpty(scheduleEnd))
+        {
+            // Add agent name as the key and other values as array of values
+            if (agentName != null && agentPrimaryPhone != null)
+            {
+                agentScheduleDict.Add(new KeyValuePair<string, string[]>(agentName, new string[] { agentName, agentPrimaryPhone, scheduleTypeCode, scheduleAgentId, scheduleStart, scheduleEnd }));
+            }
+        }
+        else
+        {
+        }
+    }
+
+    //create a fetchxml query to retrieve agent skills
+    var fetchXml = $@"<fetch version='1.0' output-format='xml-platform' mapping='logical' distinct='false'>
+        <entity name='bxd_agent'>
+            <attribute name='bxd_name' />
+            <attribute name='bxd_agentid' />
+            <attribute name='bxd_primaryphone' />
+            <attribute name='bxd_iscurrrentlyhandlingcall' />
+            <link-entity name='bxd_agent_bxd_skills' from='bxd_agentid' to='bxd_agentid' intersect='true'>
+                <link-entity name='bxd_skills' from='bxd_skillsid' to='bxd_skillsid' link-type='inner' alias='skills'>
+                    <attribute name='bxd_name' />
+                    <attribute name='bxd_skillsid' />
+                </link-entity>
+            </link-entity>
+        </entity>
+    </fetch>";
+
+    // Retrieve agents skills
+    EntityCollection responseSkills = _serviceClient.RetrieveMultipleAsync(new FetchExpression(fetchXml)).Result;
+    List<KeyValuePair<string, string[]>> agentSkillsDict = new List<KeyValuePair<string, string[]>>();
+
+    foreach (var agent in responseSkills.Entities)
+    {
+        var agentId = agent.Attributes["bxd_agentid"].ToString();
+        var agentName = agent.Attributes["bxd_name"].ToString();
+        var agentPrimaryPhone = agent.Attributes["bxd_primaryphone"].ToString();
+        var agentIsCurrentlyHandlingCall = (bool)agent.Attributes["bxd_iscurrrentlyhandlingcall"];  
+        var agentSkill = agent.GetAttributeValue<AliasedValue>("skills.bxd_name").Value.ToString();
+        var agentSkillsId = agent.GetAttributeValue<AliasedValue>("skills.bxd_skillsid").Value.ToString();
+        //var agentSchedule = agentScheduleDict.FirstOrDefault(x => x.Key == agentName);
+
+        if (!string.IsNullOrEmpty(agentId) && !string.IsNullOrEmpty(agentName) && !string.IsNullOrEmpty(agentPrimaryPhone) && !string.IsNullOrEmpty(agentSkill))
+        {
+            // Add agent name as the key and other values as array of values
+            agentSkillsDict.Add(new KeyValuePair<string, string[]>(agentName, new string[] { agentId, agentName, agentPrimaryPhone, agentSkill, agentIsCurrentlyHandlingCall.ToString() }));
+            //agentSkillsDict.Add(new KeyValuePair<string, string[]>(agentName, new string[] { agentId, agentName, agentPrimaryPhone, agentSkill, agentIsCurrentlyHandlingCall.ToString(), agentSchedule.Value[4], agentSchedule.Value[5] }));
+        }
+        else
+        {
+
+        }
+    }
+
+    // Check if the agent is available from dataverse
+    /*foreach (var agent in agentSkillsDict)
+    {
+        var agentId = agent.Value[0];
+        var agentName = agent.Value[1];
+        var agentPrimaryPhone = agent.Value[2];
+        var agentSkill = agent.Value[3];
+        var agentIsCurrentlyHandlingCall = agent.Value[4];
+        var agentStart = agent.Value[5];
+        var agentEnd = agent.Value[6];
+
+        //await CreateWorker(routerClient, queueId, agentId, agentSkill, agentSkill, agentStart, agentEnd, logger);
+        await CreateWorker(routerClient, queueId, agentId, languageSelected, issueSelected, "", "", logger);
+ 
+    } */
+    await CreateWorker(routerClient, queueId, "7fdf9acb-e8b0-ef11-b8e9-000d3a380890", "English", "Family", "", "", logger);
+    await CreateWorker(routerClient, queueId, "7fdf9acb-e8b0-ef11-b8e9-000d3a380890", "English", "Police", "", "", logger);
+    await CreateWorker(routerClient, queueId, "df655973-22b7-ef11-b8e9-000d3a380890", "English", "Other", "", "", logger);
+}
+
+async Task<Response<RouterWorker>> CreateWorker(JobRouterClient routerClient, string queueId,  string agentId, string languageSkill, string issueSkill, string startDate, string endDate, ILogger<Program> logger)
+{
+    var worker = await routerClient.CreateWorkerAsync(
+        new CreateWorkerOptions(workerId: agentId, capacity: 1)
+        {
+            Queues = { queueId },
+            Labels = { 
+                ["Language"] = new RouterValue(languageSkill), 
+                ["Issue"] = new RouterValue(issueSkill),
+            },
+            Channels = { new RouterChannel(channelId: "BFVoiceCall", capacityCostPerJob: 1) },
+            AvailableForOffers = true
+        });
+
+    return worker ?? throw new InvalidOperationException("Worker creation failed.");
+}
+
+ /* create the job for the worker */
+async Task<Response<RouterJob>> CreateJob(JobRouterClient routerClient, string queueId, string languageSkill, string issueSkill, ILogger<Program> logger)
+{
+    var jobId = Guid.NewGuid().ToString();
+    var job = await routerClient.CreateJobAsync(new CreateJobOptions(jobId, "BFVoiceCall", queueId)
+    {
+        Priority = 1,
+        RequestedWorkerSelectors =
+        {
+            new RouterWorkerSelector(key: "Language", labelOperator: LabelOperator.Equal, value: new RouterValue(languageSkill)),
+            new RouterWorkerSelector(key: "Issue", labelOperator: LabelOperator.Equal, value: new RouterValue(issueSkill))
+        }
+    });
+
+    return job ?? throw new InvalidOperationException("Job creation failed.");
 }
 
 app.MapGet("/api/transferCall", async (
